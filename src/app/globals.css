@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f8fafc; /* slate-50: neutral light gray */
+  --foreground: #0f172a; /* slate-900: dark slate untuk heading */
 }
 
 @theme inline {
@@ -12,15 +12,72 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: light;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+}
+
+::selection {
+  background: #dbeafe; /* blue-100 */
+  color: #1e3a8a; /* blue-900 */
+}
+
+/* Tekstur garis grid halus untuk background halaman (Minimalist Tech Culture). */
+.tech-grid {
+  background-image:
+    linear-gradient(to right, rgb(9 9 11 / 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(9 9 11 / 0.05) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* Efek kartu elegan khas CultFlow: ringan, bersih, terangkat saat hover. */
+.cf-card {
+  background-color: #fff;
+  border: 1px solid rgb(226 232 240 / 0.9); /* slate-200 */
+  border-radius: 0.75rem; /* rounded-xl */
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05); /* shadow-xs */
+  transition:
+    box-shadow 200ms ease-in-out,
+    border-color 200ms ease-in-out,
+    transform 200ms ease-in-out;
+}
+
+.cf-card:hover {
+  box-shadow:
+    0 4px 6px -1px rgb(0 0 0 / 0.1),
+    0 2px 4px -2px rgb(0 0 0 / 0.1); /* shadow-md */
+}
+
+/* Tampilan cetak: hanya kartu kertas (A4/A5 via dialog print). */
+@page {
+  size: A4;
+  margin: 12mm;
+}
+
+@media print {
+  aside,
+  header,
+  footer {
+    display: none !important;
+  }
+  body {
+    background: #fff !important;
+  }
+  .tech-grid {
+    background-image: none !important;
+  }
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  .print-paper {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
 }
