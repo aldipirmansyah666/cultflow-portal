@@ -22,6 +22,7 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "Dashboard", href: "/", icon: "LayoutDashboard" },
   { title: "Data Lengkap Utama", href: "/data-utama", icon: "Database" },
   { title: "Lookup Profil Agen", href: "/lookup-agen", icon: "Search" },
+  { title: "Monitoring Resi", href: "/monitoring-resi", icon: "PackageSearch" },
   { title: "Bagging Generator", href: "/bagging", icon: "Package" },
   { title: "Bailout Generator", href: "/bailout", icon: "PackageOpen" },
   { title: "Reconcile Validator", href: "/reconcile", icon: "Scale" },

@@ -4,15 +4,18 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Building2,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Database,
+  FileUp,
   FileWarning,
   Loader2,
   MapPin,
   Phone,
   RefreshCw,
   Search,
+  Upload,
   User,
   X,
 } from "lucide-react";
@@ -22,6 +25,8 @@ import {
   DATA_UTAMA_FIELD_GROUPS,
   getDataUtamaList,
   getRegionalOptions,
+  importExcelData,
+  type AgenImportSummary,
   type DataUtamaRow,
 } from "@/core/services/dataUtamaService";
 import { cn } from "@/lib/utils";
@@ -92,6 +97,15 @@ export default function DataUtamaPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<DataUtamaRow | null>(null);
+  const [role, setRole] = useState<string | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importBusy, setImportBusy] = useState(false);
+  const [importProgress, setImportProgress] = useState("");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importResult, setImportResult] = useState<AgenImportSummary | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -150,6 +164,72 @@ export default function DataUtamaPage() {
       cancelled = true;
     };
   }, []);
+
+  // Role sesi untuk tombol Import (khusus ADMIN).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/me");
+        if (!res.ok) return;
+        const body = (await res.json()) as { user?: { role?: string } };
+        if (!cancelled && typeof body.user?.role === "string") {
+          setRole(body.user.role);
+        }
+      } catch {
+        // abaikan: tombol import tetap tersembunyi
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Toast impor otomatis hilang 5 detik.
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 5000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  function openImportModal() {
+    setImportFile(null);
+    setImportProgress("");
+    setImportError(null);
+    setImportResult(null);
+    setDragOver(false);
+    setImportOpen(true);
+  }
+
+  function pickImportFile(file: File | undefined) {
+    if (!file) return;
+    setImportFile(file);
+    setImportError(null);
+    setImportResult(null);
+    setImportProgress("");
+  }
+
+  async function runImport() {
+    if (!importFile || importBusy) return;
+    setImportBusy(true);
+    setImportError(null);
+    setImportResult(null);
+    try {
+      const summary = await importExcelData(importFile, (p) =>
+        setImportProgress(p.message)
+      );
+      setImportResult(summary);
+      setToast("Berhasil memperbarui dan menambahkan data agen dari Excel!");
+      await fetchPage();
+    } catch (err) {
+      setImportError(
+        err instanceof Error ? err.message : "Impor gagal. Coba lagi."
+      );
+    } finally {
+      setImportBusy(false);
+      setImportProgress("");
+    }
+  }
 
   const rangeLabel = useMemo(() => {
     if (total === 0) return "0 data";
@@ -244,6 +324,16 @@ export default function DataUtamaPage() {
           />
           Muat Ulang
         </button>
+        {role === "ADMIN" && (
+          <button
+            type="button"
+            onClick={openImportModal}
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-opacity hover:opacity-90"
+          >
+            <Upload className="size-4" aria-hidden />
+            Import Excel
+          </button>
+        )}
       </section>
 
       {/* Tabel */}
@@ -509,6 +599,171 @@ export default function DataUtamaPage() {
           <Loader2 className="size-3.5 animate-spin" aria-hidden />
           Memuat…
         </p>
+      )}
+
+      {/* Modal Import Excel (ADMIN) */}
+      <Dialog.Root
+        open={importOpen}
+        onOpenChange={(open) => {
+          if (!open && !importBusy) setImportOpen(false);
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px]" />
+          <Dialog.Content
+            aria-describedby={undefined}
+            className="fixed top-1/2 left-1/2 z-50 max-h-[90vh] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl focus:outline-none"
+          >
+            <div className="mb-4 flex items-start justify-between gap-3">
+              <div>
+                <Dialog.Title className="text-lg font-extrabold tracking-tight text-slate-900">
+                  Import Excel Data Agen
+                </Dialog.Title>
+                <p className="mt-1 text-xs text-slate-500">
+                  Upsert ke data_lengkap_utama berdasar PPID (baris cocok
+                  ditimpa, baru ditambahkan).
+                </p>
+              </div>
+              <Dialog.Close
+                aria-label="Tutup"
+                disabled={importBusy}
+                className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-40"
+              >
+                <X className="size-5" aria-hidden />
+              </Dialog.Close>
+            </div>
+
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                if (!importBusy) setDragOver(true);
+              }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragOver(false);
+                if (!importBusy) pickImportFile(e.dataTransfer.files?.[0]);
+              }}
+              className={cn(
+                "relative flex cursor-pointer flex-col items-center justify-center gap-2 rounded-2xl border-2 border-dashed p-8 text-center transition-colors",
+                dragOver
+                  ? "border-cyan-500 bg-cyan-50"
+                  : "border-slate-200 bg-slate-50/50 hover:border-cyan-300 hover:bg-white"
+              )}
+            >
+              <FileUp className="size-8 text-cyan-600" aria-hidden />
+              <p className="text-sm font-semibold text-slate-900">
+                Seret file ke sini atau klik untuk memilih
+              </p>
+              <p className="text-xs text-slate-500">
+                .xlsx / .xls / .csv — maks 5 MB
+              </p>
+              <input
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                disabled={importBusy}
+                onChange={(e) => {
+                  pickImportFile(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+                aria-label="Pilih file Excel"
+                className="absolute inset-0 cursor-pointer opacity-0 disabled:cursor-not-allowed"
+              />
+            </div>
+
+            {importFile && (
+              <p className="mt-3 truncate rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-xs text-slate-700">
+                {importFile.name}{" "}
+                <span className="text-slate-400">
+                  ({(importFile.size / 1024).toFixed(0)} KB)
+                </span>
+              </p>
+            )}
+
+            {importBusy && importProgress !== "" && (
+              <p role="status" className="mt-3 flex items-center gap-2 text-sm font-medium text-blue-700">
+                <Loader2 className="size-4 animate-spin" aria-hidden />
+                {importProgress}
+              </p>
+            )}
+
+            {importError && (
+              <p role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+                {importError}
+              </p>
+            )}
+
+            {importResult && (
+              <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm">
+                <p className="font-bold text-emerald-800">
+                  {importResult.upserted.toLocaleString("id-ID")} baris disinkronkan
+                </p>
+                <ul className="mt-1.5 space-y-0.5 text-xs text-emerald-700">
+                  <li>Total baris valid: {importResult.totalRows.toLocaleString("id-ID")}</li>
+                  <li>Kolom terpetakan: {importResult.mappedColumns}/{importResult.totalColumns}</li>
+                  {importResult.skippedNoPpid > 0 && (
+                    <li>Dilewati tanpa PPID: {importResult.skippedNoPpid}</li>
+                  )}
+                  {importResult.missingInRemote.length > 0 && (
+                    <li>
+                      Kolom belum ada di DB dilewati: {importResult.missingInRemote.length}
+                    </li>
+                  )}
+                  {importResult.batchErrors.map((b) => (
+                    <li key={b.batch} className="text-red-600">
+                      Batch {b.batch} gagal: {b.message}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="mt-4 flex justify-end gap-2">
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  disabled={importBusy}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
+                >
+                  {importResult ? "Tutup" : "Batal"}
+                </button>
+              </Dialog.Close>
+              <button
+                type="button"
+                onClick={() => void runImport()}
+                disabled={!importFile || importBusy}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+              >
+                {importBusy && <Loader2 className="size-4 animate-spin" aria-hidden />}
+                {importBusy ? "Memproses…" : "Proses Import"}
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      {/* Toast sukses impor */}
+      {toast && (
+        <div
+          role="status"
+          className="fixed right-4 bottom-4 z-[60] flex max-w-sm items-start gap-3 rounded-xl border border-emerald-200 bg-white p-4 shadow-2xl shadow-emerald-900/10"
+        >
+          <CheckCircle2 className="size-5 shrink-0 text-emerald-600" aria-hidden />
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-slate-900">{toast}</p>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Tabel dimuat ulang otomatis.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            aria-label="Tutup notifikasi"
+            className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+          >
+            <X className="size-4" aria-hidden />
+          </button>
+        </div>
       )}
     </div>
   );

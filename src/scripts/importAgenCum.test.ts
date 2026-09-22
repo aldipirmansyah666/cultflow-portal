@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import * as XLSX from "xlsx";
+import { readSheetMatrix } from "./importAgenCum";
 import {
   buildEffectiveFields,
   cellToText,
@@ -151,7 +156,8 @@ describe("sanitizeRowForDb", () => {
   });
 });
 
-describe("mapAgenCumRowByIndex", () => {  it("memetakan per indeks dengan ctx berbeda label sama", () => {
+describe("mapAgenCumRowByIndex", () => {
+  it("memetakan per indeks dengan ctx berbeda label sama", () => {
     const row = mapAgenCumRowByIndex(
       ["Budi", "Bank CUM", "Siti"],
       ["nama_pemilik", "nama_bank", "nama_pemilik_rekening"]
@@ -419,6 +425,46 @@ describe("dedupeByPpid", () => {
     const { rows, dupCount } = dedupeByPpid(input);
     expect(dupCount).toBe(0);
     expect(rows).toHaveLength(2);
+  });
+});
+
+describe("readSheetMatrix (sheet Agen CUM eksak)", () => {
+  function tmpWorkbook(sheets: Record<string, unknown[][]>): string {
+    const wb = XLSX.utils.book_new();
+    for (const [name, aoa] of Object.entries(sheets)) {
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name);
+    }
+    const full = path.join(
+      fs.mkdtempSync(path.join(os.tmpdir(), "agencum-")),
+      "tes.xlsx"
+    );
+    XLSX.writeFile(wb, full);
+    return full;
+  }
+
+  it("membaca sheet Agen CUM persis", () => {
+    const full = tmpWorkbook({
+      "Sheet1": [["abaikan"]],
+      "Agen CUM": [["PPID"], ["X1"]],
+    });
+    try {
+      const { sheetName, matrix } = readSheetMatrix(full, "Agen CUM");
+      expect(sheetName).toBe("Agen CUM");
+      expect(matrix[0]).toEqual(["PPID"]);
+    } finally {
+      fs.rmSync(path.dirname(full), { recursive: true, force: true });
+    }
+  });
+
+  it("error persis bila sheet absen (tanpa fallback fuzzy)", () => {
+    const full = tmpWorkbook({ "agen cum": [["PPID"]] });
+    try {
+      expect(() => readSheetMatrix(full, "Agen CUM")).toThrow(
+        "Sheet 'Agen CUM' tidak ditemukan dalam file Excel."
+      );
+    } finally {
+      fs.rmSync(path.dirname(full), { recursive: true, force: true });
+    }
   });
 });
 

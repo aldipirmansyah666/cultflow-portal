@@ -7,11 +7,12 @@ import {
 } from "./navigation";
 
 describe("NAV_ITEMS", () => {
-  it("memiliki 8 menu dengan href yang benar", () => {
+  it("memiliki 9 menu dengan href yang benar", () => {
     expect(NAV_ITEMS.map((i) => i.href)).toEqual([
       "/",
       "/data-utama",
       "/lookup-agen",
+      "/monitoring-resi",
       "/bagging",
       "/bailout",
       "/reconcile",

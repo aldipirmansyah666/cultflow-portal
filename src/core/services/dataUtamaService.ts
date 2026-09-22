@@ -1,4 +1,19 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import * as XLSX from "xlsx";
+import {
+  validateExcelMagicBytes,
+  validateFileSize,
+} from "@/lib/fileValidation";
+import {
+  buildEffectiveFields,
+  dedupeByPpid,
+  fetchRemoteColumns,
+  findHeaderRowIndex,
+  mapAgenCumRowByIndex,
+  resolveAllowedColumns,
+  sanitizeRowForDb,
+  type InsertRow,
+} from "@/core/parsers/agenCumMapper";
 
 /**
  * Service untuk tabel `data_lengkap_utama` (sheet 'Agen CUM').
@@ -355,10 +370,11 @@ export function classifySupabaseError(
  */
 export function logSupabaseError(
   context: string,
-  error: SupabaseErrorLike | null | undefined
+  error: SupabaseErrorLike | null | undefined,
+  scope = "data-utama"
 ): ClassifiedSupabaseError {
   const classified = classifySupabaseError(error);
-  console.error(`[data-utama:${context}] Supabase error (${classified.kind})`, {
+  console.error(`[${scope}:${context}] Supabase error (${classified.kind})`, {
     code: classified.code || "(tanpa kode)",
     message: classified.message,
     details:
@@ -668,4 +684,182 @@ export function buildLookupWaText(profile: AgenProfile): string {
     `NPWP: ${waVal(profile.npwp)}`,
     WA_DASH,
   ].join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Import Excel (upsert via ppid)
+// ---------------------------------------------------------------------------
+
+export const IMPORT_BATCH_SIZE = 500;
+export const IMPORT_MAX_ROWS = 20000;
+export const IMPORT_MAX_COLS = 200;
+
+const IMPORT_ALLOWED_EXTENSIONS = [".xlsx", ".xls", ".csv"];
+
+export interface AgenImportSummary {
+  totalRows: number;
+  mappedColumns: number;
+  totalColumns: number;
+  /** Baris ter-upsert (insert baru + update PPID cocok). */
+  upserted: number;
+  /** Baris tanpa PPID (dilewati — tak ada kunci konflik). */
+  skippedNoPpid: number;
+  missingInRemote: string[];
+  unmapped: { label: string; fills: number }[];
+  batchErrors: { batch: number; message: string }[];
+}
+
+export interface ImportProgress {
+  stage: "parse" | "upload" | "done";
+  message: string;
+  rows?: number;
+}
+
+/**
+ * Orkestrasi upsert matriks AOA ke `data_lengkap_utama` (dipakai API route
+ * server dengan service_role): deteksi header -> petakan -> saring skema
+ * live -> dedup PPID -> upsert batch `onConflict: 'ppid'`.
+ * Remote wajib punya UNIQUE(ppid) penuh (data_lengkap_utama_ppid_key).
+ */
+export async function importAgenMatrix(
+  client: SupabaseClient,
+  matrix: unknown[][]
+): Promise<AgenImportSummary> {
+  if (!Array.isArray(matrix) || matrix.length === 0) {
+    throw new Error("Matriks sheet kosong / tak terbaca.");
+  }
+  if (matrix.length > IMPORT_MAX_ROWS + 30) {
+    throw new Error(
+      `Terlalu banyak baris (${matrix.length}). Maksimal ${IMPORT_MAX_ROWS}.`
+    );
+  }
+  const width = Math.max(0, ...matrix.slice(0, 10).map((r) => (Array.isArray(r) ? r.length : 0)));
+  if (width > IMPORT_MAX_COLS) {
+    throw new Error(`Terlalu banyak kolom (${width}). Maksimal ${IMPORT_MAX_COLS}.`);
+  }
+
+  const headerIndex = findHeaderRowIndex(matrix);
+  if (headerIndex === -1) {
+    throw new Error("Baris header tidak dikenali (dipindai 10 baris pertama).");
+  }
+  const headers = (matrix[headerIndex] ?? []).map((h) =>
+    h === null || h === undefined ? "" : String(h)
+  );
+  const groupRow = headerIndex > 0 ? (matrix[headerIndex - 1] ?? []) : [];
+  const rowsAbove = headerIndex > 1 ? [matrix[headerIndex - 2] ?? []] : [];
+  const effective = buildEffectiveFields(headers, groupRow, rowsAbove);
+
+  const unmappedFills = new Map<string, number>();
+  const rows: InsertRow[] = [];
+  for (let r = headerIndex + 1; r < matrix.length; r += 1) {
+    const cells = matrix[r] ?? [];
+    const mapped = mapAgenCumRowByIndex(
+      cells,
+      effective.map((e) => e.field),
+      effective.map((e) => e.label)
+    );
+    if (mapped) rows.push(mapped);
+    effective.forEach((e, c) => {
+      if (e.field !== null) return;
+      const label = e.label === "" ? `(kolom ${c + 1} tanpa header)` : e.label;
+      const v = cells[c];
+      if (v !== null && v !== undefined && String(v).trim() !== "") {
+        unmappedFills.set(label, (unmappedFills.get(label) ?? 0) + 1);
+      }
+    });
+  }
+
+  const schema = await fetchRemoteColumns(client);
+  const { allowed, missingInRemote } = resolveAllowedColumns(schema.columns);
+
+  const withPpid = rows.filter(
+    (r) => typeof r.ppid === "string" && r.ppid.trim() !== ""
+  );
+  const skippedNoPpid = rows.length - withPpid.length;
+  const { rows: deduped } = dedupeByPpid(withPpid);
+  const clean = deduped.map((r) => sanitizeRowForDb(r, allowed));
+
+  let upserted = 0;
+  const batchErrors: { batch: number; message: string }[] = [];
+  for (let i = 0; i < clean.length; i += IMPORT_BATCH_SIZE) {
+    const batch = clean.slice(i, i + IMPORT_BATCH_SIZE);
+    const batchNo = Math.floor(i / IMPORT_BATCH_SIZE) + 1;
+    const { error } = await client
+      .from("data_lengkap_utama")
+      .upsert(batch, { onConflict: "ppid" });
+    if (error) {
+      batchErrors.push({ batch: batchNo, message: error.message });
+      continue;
+    }
+    upserted += batch.length;
+  }
+
+  return {
+    totalRows: rows.length,
+    mappedColumns: effective.filter((e) => e.field !== null).length,
+    totalColumns: effective.length,
+    upserted,
+    skippedNoPpid,
+    missingInRemote,
+    unmapped: [...unmappedFills.entries()]
+      .map(([label, fills]) => ({ label, fills }))
+      .sort((a, b) => b.fills - a.fills),
+    batchErrors,
+  };
+}
+
+/**
+ * Alur browser: validasi file -> parse SheetJS -> POST matriks AOA ke
+ * `/api/data-utama/import` (upsert service_role di server) -> ringkasan.
+ * Upsert Supabase-nya dieksekusi di API route, bukan dari browser.
+ */
+export async function importExcelData(
+  file: File,
+  onProgress?: (p: ImportProgress) => void
+): Promise<AgenImportSummary> {
+  const lowerName = file.name.toLowerCase();
+  if (!IMPORT_ALLOWED_EXTENSIONS.some((ext) => lowerName.endsWith(ext))) {
+    throw new Error("Format file harus .xlsx, .xls, atau .csv.");
+  }
+  const sizeError = validateFileSize(file);
+  if (sizeError) throw new Error(sizeError);
+
+  onProgress?.({ stage: "parse", message: "Membaca file Excel…" });
+  const buffer = await file.arrayBuffer();
+  if (!validateExcelMagicBytes(buffer)) {
+    throw new Error("Format file tidak valid. Harap unggah Excel/CSV yang sah.");
+  }
+  const workbook = XLSX.read(buffer, { type: "array" });
+  // WAJIB sheet "Agen CUM" (eksak) — jangan sheet pertama sembarang.
+  const sheet = workbook.Sheets["Agen CUM"];
+  if (!sheet) {
+    throw new Error("Sheet 'Agen CUM' tidak ditemukan dalam file Excel.");
+  }
+  const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
+    header: 1,
+    defval: null,
+    raw: true,
+  }) as unknown[][];
+
+  const dataRows = Math.max(0, matrix.length - 1);
+  onProgress?.({
+    stage: "upload",
+    message: `Mengunggah & Menyingkronkan ${dataRows.toLocaleString("id-ID")}+ data agen…`,
+    rows: dataRows,
+  });
+
+  const res = await fetch("/api/data-utama/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ matrix }),
+  });
+  const body = (await res.json()) as Partial<AgenImportSummary> & {
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(body.error || "Impor gagal di server.");
+  }
+
+  onProgress?.({ stage: "done", message: "Selesai.", rows: dataRows });
+  return body as AgenImportSummary;
 }
