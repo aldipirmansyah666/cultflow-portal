@@ -48,6 +48,13 @@ export function LayoutShell({ children }: LayoutShellProps) {
     };
   }, []);
 
+  // Drawer mobile selalu tertutup ulang setiap pindah route —
+  // kasus kanonis sinkronisasi state terhadap navigasi.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMobileOpen(false);
+  }, [pathname]);
+
   const toggleSidebar = () => {
     setCollapsed((prev) => {
       const next = !prev;

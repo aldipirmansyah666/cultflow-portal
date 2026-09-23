@@ -150,6 +150,13 @@ export const RESI_PAGE_SIZE_OPTIONS = [20, 50, 100, 200] as const;
 /** Kolom pencarian: no resi + nama loket. */
 const RESI_SEARCH_COLUMNS = ["no_resi", "agen"] as const;
 
+/**
+ * Kolom yang benar-benar dipakai tabel Monitoring (bukan select('*'))
+ * agar payload list paginasi tetap ringan.
+ */
+export const RESI_LIST_COLUMNS =
+  "id,no_resi,agen,layanan,status_resi,status_followup,is_selesai,catatan_followup,followed_up_by,followed_up_at";
+
 function sanitizeKeyword(raw: string): string {
   return raw
     .replace(/[%_,()]/g, " ")
@@ -206,7 +213,9 @@ export async function getMonitoringResiList(
     Math.max(1, Math.floor(params.pageSize ?? RESI_DEFAULT_PAGE_SIZE))
   );
 
-  let query = client.from("resi").select("*", { count: "exact" });
+  let query = client
+    .from("resi")
+    .select(RESI_LIST_COLUMNS, { count: "exact" });
 
   const status = params.status ?? "semua";
   if (status === "belum") {

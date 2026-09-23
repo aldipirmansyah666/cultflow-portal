@@ -14,13 +14,29 @@ import {
   Scale,
   Wallet,
 } from "lucide-react";
+import nextDynamic from "next/dynamic";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import {
   getDashboardStats,
   type DashboardStats,
 } from "@/core/services/dashboardService";
-import { QuickLookupBox } from "@/components/dashboard/QuickLookupBox";
 import { cn } from "@/lib/utils";
+
+/** Search box di bawah fold — chunk terpisah + skeleton saat transisi. */
+const QuickLookupBox = nextDynamic(
+  () =>
+    import("@/components/dashboard/QuickLookupBox").then(
+      (m) => m.QuickLookupBox
+    ),
+  {
+    loading: () => (
+      <div aria-hidden className="mt-3 flex gap-2">
+        <div className="h-10 flex-1 animate-pulse rounded-lg bg-slate-100" />
+        <div className="h-10 w-16 animate-pulse rounded-lg bg-slate-100" />
+      </div>
+    ),
+  }
+);
 
 export const dynamic = "force-dynamic";
 
@@ -165,11 +181,11 @@ export default async function DashboardPage() {
           accent="cyan"
         />
         <StatCard
-          title="Pending Bagging"
+          title="Resi Belum Follow Up"
           value={stats ? idFormatter.format(stats.resiPendingFollowUp) : "—"}
-          subtitle="resi perlu follow-up"
-          href="/bagging"
-          hrefLabel="Buka Bagging"
+          subtitle="monitoring resi"
+          href="/monitoring-resi"
+          hrefLabel="Buka Monitoring"
           icon={<Package className="size-5 text-amber-600" aria-hidden />}
           accent="amber"
         />
@@ -256,21 +272,21 @@ export default async function DashboardPage() {
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="rounded-xl bg-white/10 px-3 py-2 ring-1 ring-white/15">
                 <p className="text-lg font-extrabold text-cyan-300">
-                  {stats ? idFormatter.format(stats.agenTotal) : "—"}
+                  {stats ? idFormatter.format(stats.resiTotal) : "—"}
                 </p>
-                <p className="text-[10px] tracking-wide text-blue-200 uppercase">Agen</p>
+                <p className="text-[10px] tracking-wide text-blue-200 uppercase">Total Resi</p>
               </div>
               <div className="rounded-xl bg-white/10 px-3 py-2 ring-1 ring-white/15">
                 <p className="text-lg font-extrabold text-cyan-300">
-                  {stats ? idFormatter.format(stats.resiPendingFollowUp) : "—"}
+                  {stats ? idFormatter.format(stats.resiSelesai) : "—"}
                 </p>
-                <p className="text-[10px] tracking-wide text-blue-200 uppercase">FU Resi</p>
+                <p className="text-[10px] tracking-wide text-blue-200 uppercase">Selesai</p>
               </div>
               <div className="rounded-xl bg-white/10 px-3 py-2 ring-1 ring-white/15">
                 <p className="text-lg font-extrabold text-cyan-300">
-                  {stats ? idFormatter.format(stats.bailoutCount) : "—"}
+                  {stats ? idFormatter.format(stats.resiToday) : "—"}
                 </p>
-                <p className="text-[10px] tracking-wide text-blue-200 uppercase">Bailout</p>
+                <p className="text-[10px] tracking-wide text-blue-200 uppercase">Hari Ini</p>
               </div>
             </div>
             <p className="font-mono text-[11px] text-slate-400">

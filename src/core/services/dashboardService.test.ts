@@ -26,6 +26,10 @@ function fakeDashClient(
     calls.push(`eq:${c}=${String(v)}`);
     return chain;
   };
+  chain.gte = (c: string, v: unknown) => {
+    calls.push(`gte:${c}=${String(v)}`);
+    return chain;
+  };
   chain.limit = (m: number) => {
     calls.push(`limit:${m}`);
     return terminal("rows");
@@ -54,6 +58,9 @@ describe("getDashboardStats", () => {
     const { client, calls } = fakeDashClient([
       { count: 1463, data: [] },
       { count: 90, data: [] },
+      { count: 120, data: [] },
+      { count: 15, data: [] },
+      { count: 7, data: [] },
       { count: 3, data: [] },
       { count: null, data: [{ nominal: 100 }, { nominal: 250 }, { nominal: null }] },
     ]);
@@ -61,17 +68,25 @@ describe("getDashboardStats", () => {
     expect(stats).toEqual({
       agenTotal: 1463,
       resiPendingFollowUp: 90,
+      resiTotal: 120,
+      resiSelesai: 15,
+      resiToday: 7,
       bailoutCount: 3,
       bailoutNominal: 350,
       bailoutCapped: false,
     });
-    expect(calls).toContain("eq:status_fu=PERLU FOLLOW UP");
+    expect(calls).toContain("eq:status_followup=BELUM_FOLLOWUP");
+    expect(calls).toContain("eq:is_selesai=SELESAI");
+    expect(calls.some((c) => c.startsWith("gte:created_at="))).toBe(true);
     expect(calls).toContain("limit:5000");
   });
 
   it("bailout kosong -> nominal 0 tanpa query sum", async () => {
     const { client, calls } = fakeDashClient([
       { count: 10, data: [] },
+      { count: 0, data: [] },
+      { count: 0, data: [] },
+      { count: 0, data: [] },
       { count: 0, data: [] },
       { count: 0, data: [] },
     ]);
@@ -85,6 +100,9 @@ describe("getDashboardStats", () => {
     const { client } = fakeDashClient([
       { count: 5, data: [] },
       { count: 1, data: [] },
+      { count: 2, data: [] },
+      { count: 0, data: [] },
+      { count: 0, data: [] },
       { count: 6000, data: [] },
       { count: null, data: [{ nominal: 10 }] },
     ]);

@@ -4,6 +4,7 @@ import {
   getResiList,
   isFollowedUp,
   normalizeFollowUpStatus,
+  RESI_LIST_COLUMNS,
   updateFollowUpStatus,
 } from "./resiService";
 
@@ -119,7 +120,7 @@ describe("getResiList", () => {
       { status: "belum", search: "MUC", page: 1, pageSize: 20 }
     );
     expect(captured.table).toBe("resi");
-    expect(captured.select?.[0]).toBe("*");
+    expect(captured.select?.[0]).toBe(RESI_LIST_COLUMNS);
     expect(captured.eqs).toEqual([["status_followup", "BELUM_FOLLOWUP"]]);
     expect(captured.or).toContain("no_resi.ilike.%MUC%");
     expect(captured.or).toContain("agen.ilike.%MUC%");

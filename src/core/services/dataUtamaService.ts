@@ -615,6 +615,13 @@ export async function suggestAgen(
 }
 
 /**
+ * Kolom profil yang dipakai toAgenProfile (bukan select('*')).
+ * Dipakai lookup exact + fuzzy agar payload tetap ringan.
+ */
+export const AGEN_PROFILE_COLUMNS =
+  "ppid,no_dirian,location_id,user_mile,email,password_mile,nama_loket_kurlog,nama_loket_onpays,alamat_lengkap_loket,kel_desa,kec,kab_kot,nama_pemilik,no_hp_pemilik,no_ktp,no_npwp";
+
+/**
  * Lookup profil: PPID persis (case-insensitive) dulu, lalu fallback
  * parsial PPID/nama. Kembalikan null bila tidak ada yang cocok.
  */
@@ -627,7 +634,7 @@ export async function lookupAgenByPpid(
 
   const exact = await client
     .from("data_lengkap_utama")
-    .select("*")
+    .select(AGEN_PROFILE_COLUMNS)
     .ilike("ppid", key)
     .limit(1);
   if (exact.error) {
@@ -640,7 +647,7 @@ export async function lookupAgenByPpid(
   const pattern = `%${key}%`;
   const fuzzy = await client
     .from("data_lengkap_utama")
-    .select("*")
+    .select(AGEN_PROFILE_COLUMNS)
     .or(
       PROFILE_LOOKUP_COLUMNS.map((col) => `${col}.ilike.${pattern}`).join(",")
     )

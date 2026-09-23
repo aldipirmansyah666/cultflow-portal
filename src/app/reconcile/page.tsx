@@ -9,7 +9,6 @@ import {
   Scale,
   XCircle,
 } from "lucide-react";
-import * as XLSX from "xlsx";
 import {
   buildReconcileBreakdown,
   validateReconcileRows,
@@ -70,11 +69,13 @@ export default function ReconcilePage() {
     setParseError(null);
     setResult(null);
     try {
+      // xlsx (~400KB) dimuat on-demand agar tidak membebani initial load.
+      const { read, utils } = await import("xlsx");
       const buffer = await file.arrayBuffer();
-      const workbook = XLSX.read(buffer, { type: "array" });
+      const workbook = read(buffer, { type: "array" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0] ?? ""];
       if (!firstSheet) throw new Error("Berkas tidak berisi sheet.");
-      const matrix = XLSX.utils.sheet_to_json<unknown[]>(firstSheet, {
+      const matrix = utils.sheet_to_json<unknown[]>(firstSheet, {
         header: 1,
         defval: null,
         raw: true,
