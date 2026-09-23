@@ -103,8 +103,9 @@ describe("buildLookupWaText", () => {
     const text = buildLookupWaText(
       toAgenProfile({ ...SAMPLE_ROW, password_mile: null })
     );
-    expect(text).toContain("*PROFIL AGENPOS - PosIND*");
-    expect(text).toContain("PPID: 53BSPA29321JBNDS");
+    expect(text).not.toContain("PROFIL AGENPOS");
+    expect(text).not.toContain("------------------------------");
+    expect(text.startsWith("PPID: 53BSPA29321JBNDS")).toBe(true);
     expect(text).toContain("Nopend/Kode Dirian: 45465S1");
     expect(text).toContain("Pass: -");
     expect(text).toContain("NIK: 3210010804830141");

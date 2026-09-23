@@ -653,20 +653,17 @@ export async function lookupAgenByPpid(
   return fuzzyRows.length > 0 && fuzzyRows[0] ? fuzzyRows[0] : null;
 }
 
-const WA_DASH = "------------------------------";
-
 function waVal(value: string): string {
   return value === "" ? "-" : value;
 }
 
 /**
  * Teks format WhatsApp profil agen (cermin field card PosIND).
+ * Tanpa header dan garis dekoratif — langsung daftar field.
  * Nilai kosong diganti "-".
  */
 export function buildLookupWaText(profile: AgenProfile): string {
   return [
-    "*PROFIL AGENPOS - PosIND*",
-    WA_DASH,
     `PPID: ${waVal(profile.ppid)}`,
     `Nopend/Kode Dirian: ${waVal(profile.nopend)}`,
     `IdLoc: ${waVal(profile.idLoc)}`,
@@ -682,7 +679,6 @@ export function buildLookupWaText(profile: AgenProfile): string {
     `Email: ${waVal(profile.email)}`,
     `NIK: ${waVal(profile.nik)}`,
     `NPWP: ${waVal(profile.npwp)}`,
-    WA_DASH,
   ].join("\n");
 }
 
