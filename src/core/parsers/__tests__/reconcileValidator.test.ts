@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { validateReconcileRows } from "../reconcileValidator";
+import {
+  buildReconcileBreakdown,
+  normalizeResi,
+  validateReconcileRows,
+} from "../reconcileValidator";
 
 describe("validateReconcileRows — Rule 1 (row-level)", () => {
   it("resi EC3 valid bila diawali SHPE atau P260", () => {
@@ -20,10 +24,12 @@ describe("validateReconcileRows — Rule 1 (row-level)", () => {
     expect(result.isValid).toBe(false);
   });
 
-  it("resi PKH valid bila diawali P260 atau TTSPOS", () => {
+  it("resi PKH valid bila diawali P260, TTSPOS, atau 26MNG", () => {
     const result = validateReconcileRows([
       { produk: "PKH", nomor_resi: "P260111" },
       { produk: "PKH", nomor_resi: "TTSPOS222" },
+      { produk: "PKH", nomor_resi: "26MNG333" },
+      { produk: 'PKH', nomor_resi: '\u00a026mng\u200b123\u00a0' },
     ]);
     expect(result.rows.every((row) => row.isValid)).toBe(true);
   });
@@ -33,7 +39,23 @@ describe("validateReconcileRows — Rule 1 (row-level)", () => {
       { produk: "PKH", nomor_resi: "SHPE333" },
     ]);
     expect(result.rows[0]?.isValid).toBe(false);
-    expect(result.rows[0]?.reason).toBe("Resi PKH harus diawali P260 atau TTSPOS");
+    expect(result.rows[0]?.reason).toBe(
+      "Resi PKH harus diawali P260, TTSPOS, atau 26MNG"
+    );
+  });
+
+  it("normalisasi resi: NBSP, zero-width, dan spasi dalam dihapus", () => {
+    expect(normalizeResi("\u00a026MNG123\u00a0")).toBe("26MNG123");
+    expect(normalizeResi("26\u200bMNG123")).toBe("26MNG123");
+    expect(normalizeResi("26 MNG 123")).toBe("26MNG123");
+    expect(normalizeResi(" 26mng1 ")).toBe("26MNG1");
+    const result = validateReconcileRows([
+      { produk: 'PKH', nomor_resi: '\u00a026mng\u200b123\u00a0' },
+    ]);
+    expect(result.rows[0]).toMatchObject({
+      nomorResi: "26MNG123",
+      isValid: true,
+    });
   });
 
   it("produk lain selalu valid", () => {
@@ -115,5 +137,55 @@ describe("validateReconcileRows — Rule 2 (file-level)", () => {
     ]);
     expect(result.summary).toEqual({ total: 3, valid: 2, invalid: 1 });
     expect(result.isValid).toBe(false);
+  });
+
+  it("Rule 2 PKH tidak menuntut 26MNG (berkas lama tetap komplit)", () => {
+    const legacy = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "P2601" },
+      { produk: "PKH", nomor_resi: "TTSPOS2" },
+    ]);
+    expect(legacy.fileIssues).toHaveLength(0);
+    expect(legacy.isValid).toBe(true);
+
+    const only26mng = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "26MNG1" },
+    ]);
+    // Baris valid, tetapi cakupan P260/TTSPOS tetap ditagih.
+    expect(only26mng.rows[0]?.isValid).toBe(true);
+    expect(only26mng.fileIssues).toHaveLength(2);
+    expect(only26mng.isValid).toBe(false);
+  });
+});
+
+describe("buildReconcileBreakdown", () => {
+  it("rincian valid/invalid per produk dan prefix", () => {
+    const result = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "P2601" },
+      { produk: "PKH", nomor_resi: "P2602" },
+      { produk: "PKH", nomor_resi: "TTSPOS3" },
+      { produk: "PKH", nomor_resi: "26MNG4" },
+      { produk: "PKH", nomor_resi: "SALAH" },
+      { produk: "EC3", nomor_resi: "SHPE5" },
+      { produk: "EC3", nomor_resi: "P2606" },
+      { produk: "EC3", nomor_resi: "SALAH" },
+      { produk: "REG", nomor_resi: "X1" },
+    ]);
+    expect(buildReconcileBreakdown(result.rows)).toEqual({
+      pkhValid: 4,
+      ec3Valid: 2,
+      pkhInvalid: 1,
+      ec3Invalid: 1,
+      pkhValidByPrefix: { P260: 2, TTSPOS: 1, "26MNG": 1 },
+      ec3ValidByPrefix: { SHPE: 1, P260: 1 },
+    });
+  });
+
+  it("kosong -> semua nol", () => {
+    expect(buildReconcileBreakdown([])).toMatchObject({
+      pkhValid: 0,
+      ec3Valid: 0,
+      pkhInvalid: 0,
+      ec3Invalid: 0,
+    });
   });
 });

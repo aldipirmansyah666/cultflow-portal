@@ -32,11 +32,33 @@ export interface ReconcileValidationResult {
   summary: { total: number; valid: number; invalid: number };
 }
 
-const EC3_PREFIXES = ["SHPE", "P260"] as const;
-const PKH_PREFIXES = ["P260", "TTSPOS"] as const;
+export const EC3_PREFIXES = ["SHPE", "P260"] as const;
+/** Prefix diterima untuk PKH (Rule 1 / validasi baris). */
+export const PKH_ACCEPTED_PREFIXES = ["P260", "TTSPOS", "26MNG"] as const;
+/**
+ * Prefix wajib cakupan berkas PKH (Rule 2). SENGAJA tanpa 26MNG agar
+ * berkas lama (P260+TTSPOS) tidak tertolak.
+ */
+export const PKH_REQUIRED_COVERAGE = ["P260", "TTSPOS"] as const;
 
-function normalize(value: string | undefined): string {
-  return (value ?? "").trim().toUpperCase();
+const NBSP_REGEX = /\u00A0/g;
+const ZERO_WIDTH_REGEX = /[\uFEFF\u200B\u200C\u200D\u2060\u180E]/g;
+
+/** Buang karakter tak kasatmata (NBSP, zero-width, carriage return). */
+function stripInvisible(value: string): string {
+  return value
+    .replace(NBSP_REGEX, "")
+    .replace(ZERO_WIDTH_REGEX, "")
+    .replace(/\r/g, "");
+}
+
+function normalize(value: unknown): string {
+  return stripInvisible(String(value ?? "")).trim().toUpperCase();
+}
+
+/** Normalisasi nomor resi: tak kasatmata + seluruh spasi dihapus + uppercase. */
+export function normalizeResi(value: unknown): string {
+  return normalize(value).replace(/\s+/g, "");
 }
 
 function startsWithAny(resi: string, prefixes: readonly string[]): boolean {
@@ -45,7 +67,7 @@ function startsWithAny(resi: string, prefixes: readonly string[]): boolean {
 
 function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult {
   const produk = normalize(row.produk);
-  const nomorResi = normalize(row.nomor_resi);
+  const nomorResi = normalizeResi(row.nomor_resi);
 
   if (produk === "EC3" && !startsWithAny(nomorResi, EC3_PREFIXES)) {
     return {
@@ -57,13 +79,13 @@ function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult 
     };
   }
 
-  if (produk === "PKH" && !startsWithAny(nomorResi, PKH_PREFIXES)) {
+  if (produk === "PKH" && !startsWithAny(nomorResi, PKH_ACCEPTED_PREFIXES)) {
     return {
       index,
       produk,
       nomorResi,
       isValid: false,
-      reason: "Resi PKH harus diawali P260 atau TTSPOS",
+      reason: "Resi PKH harus diawali P260, TTSPOS, atau 26MNG",
     };
   }
 
@@ -89,7 +111,7 @@ function checkFileCoverage(results: ReconcileRowResult[]): ReconcileFileIssue[] 
   }
 
   if (hasProduct("PKH")) {
-    for (const prefix of PKH_PREFIXES) {
+    for (const prefix of PKH_REQUIRED_COVERAGE) {
       if (!hasResiPrefix(prefix)) {
         issues.push({
           rule: "PKH_PREFIX_COVERAGE",
@@ -102,9 +124,63 @@ function checkFileCoverage(results: ReconcileRowResult[]): ReconcileFileIssue[] 
   return issues;
 }
 
+export interface ReconcileBreakdown {
+  pkhValid: number;
+  ec3Valid: number;
+  pkhInvalid: number;
+  ec3Invalid: number;
+  /** Resi valid per prefix (PKH: P260/TTSPOS/26MNG). */
+  pkhValidByPrefix: Record<(typeof PKH_ACCEPTED_PREFIXES)[number], number>;
+  /** Resi valid per prefix (EC3: SHPE/P260). */
+  ec3ValidByPrefix: Record<(typeof EC3_PREFIXES)[number], number>;
+}
+
+/** Rincian jumlah resi per produk & prefix dari hasil validasi baris. */
+export function buildReconcileBreakdown(
+  rows: ReconcileRowResult[]
+): ReconcileBreakdown {
+  const breakdown: ReconcileBreakdown = {
+    pkhValid: 0,
+    ec3Valid: 0,
+    pkhInvalid: 0,
+    ec3Invalid: 0,
+    pkhValidByPrefix: { P260: 0, TTSPOS: 0, "26MNG": 0 },
+    ec3ValidByPrefix: { SHPE: 0, P260: 0 },
+  };
+  for (const row of rows) {
+    if (row.produk === "PKH") {
+      if (!row.isValid) {
+        breakdown.pkhInvalid += 1;
+        continue;
+      }
+      breakdown.pkhValid += 1;
+      for (const prefix of PKH_ACCEPTED_PREFIXES) {
+        if (row.nomorResi.startsWith(prefix)) {
+          breakdown.pkhValidByPrefix[prefix] += 1;
+          break;
+        }
+      }
+    } else if (row.produk === "EC3") {
+      if (!row.isValid) {
+        breakdown.ec3Invalid += 1;
+        continue;
+      }
+      breakdown.ec3Valid += 1;
+      for (const prefix of EC3_PREFIXES) {
+        if (row.nomorResi.startsWith(prefix)) {
+          breakdown.ec3ValidByPrefix[prefix] += 1;
+          break;
+        }
+      }
+    }
+  }
+  return breakdown;
+}
+
 /**
  * Validasi baris-baris reconcile beserta cakupan file.
- * Perbandingan produk & resi bersifat case-insensitive (di-trim + uppercase).
+ * Perbandingan produk & resi bersifat case-insensitive (buang karakter tak
+ * kasatmata + trim + uppercase; nomor resi juga hapus seluruh spasi dalam).
  */
 export function validateReconcileRows(
   rows: ReconcileInputRow[],

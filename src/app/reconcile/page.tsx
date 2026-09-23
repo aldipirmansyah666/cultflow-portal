@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
+  buildReconcileBreakdown,
   validateReconcileRows,
   type ReconcileValidationResult,
 } from "@/core/parsers/reconcileValidator";
@@ -58,6 +59,11 @@ export default function ReconcilePage() {
       ? result.rows.filter((r) => !r.isValid)
       : result.rows;
   }, [result, invalidOnly]);
+
+  const breakdown = useMemo(
+    () => (result ? buildReconcileBreakdown(result.rows) : null),
+    [result]
+  );
 
   async function handleFile(file: File) {
     setParsing(true);
@@ -120,7 +126,8 @@ export default function ReconcilePage() {
             </h1>
             <p className="mt-1 text-sm text-blue-100">
               Unggah berkas Excel/CSV berisi kolom Produk &amp; Nomor Resi
-              untuk validasi prefix EC3/PKH.
+              untuk validasi prefix EC3 (SHPE/P260) &amp; PKH
+              (P260/TTSPOS/26MNG).
             </p>
           </div>
         </div>
@@ -174,26 +181,85 @@ export default function ReconcilePage() {
 
       {result && (
         <>
-          <section className="grid gap-3 sm:grid-cols-4">
-            {[
-              { label: "Total Baris", value: result.summary.total, tone: "text-slate-900" },
-              { label: "Valid", value: result.summary.valid, tone: "text-emerald-600" },
-              { label: "Invalid", value: result.summary.invalid, tone: "text-red-600" },
-              {
-                label: "Status Berkas",
-                value: result.isValid ? "VALID" : "BERMASALAH",
-                tone: result.isValid ? "text-emerald-600" : "text-amber-600",
-              },
-            ].map((stat) => (
-              <div key={stat.label} className="cf-card p-4 text-center">
-                <p className={cn("text-2xl font-extrabold", stat.tone)}>
-                  {stat.value}
-                </p>
-                <p className="mt-1 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
-                  {stat.label}
-                </p>
-              </div>
-            ))}
+          <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="cf-card p-4 text-center">
+              <p className="text-2xl font-extrabold text-slate-900">
+                {result.summary.total}
+              </p>
+              <p className="mt-1 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+                Total Baris
+              </p>
+            </div>
+            <div className="cf-card p-4 text-center">
+              <p className="text-2xl font-extrabold text-emerald-600">
+                {result.summary.valid}
+              </p>
+              <p className="mt-1 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+                Resi Valid
+              </p>
+              {breakdown && (
+                <dl className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-left text-xs">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">PKH Valid</dt>
+                    <dd className="font-extrabold text-emerald-700">
+                      {breakdown.pkhValid} resi
+                    </dd>
+                  </div>
+                  <dd className="font-mono text-[11px] text-slate-500">
+                    P260: {breakdown.pkhValidByPrefix.P260} • TTSPOS:{" "}
+                    {breakdown.pkhValidByPrefix.TTSPOS} • 26MNG:{" "}
+                    {breakdown.pkhValidByPrefix["26MNG"]}
+                  </dd>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">EC3 Valid</dt>
+                    <dd className="font-extrabold text-emerald-700">
+                      {breakdown.ec3Valid} resi
+                    </dd>
+                  </div>
+                  <dd className="font-mono text-[11px] text-slate-500">
+                    SHPE: {breakdown.ec3ValidByPrefix.SHPE} • P260:{" "}
+                    {breakdown.ec3ValidByPrefix.P260}
+                  </dd>
+                </dl>
+              )}
+            </div>
+            <div className="cf-card p-4 text-center">
+              <p className="text-2xl font-extrabold text-red-600">
+                {result.summary.invalid}
+              </p>
+              <p className="mt-1 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+                Resi Invalid
+              </p>
+              {breakdown && (
+                <dl className="mt-2 space-y-1 border-t border-slate-100 pt-2 text-left text-xs">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">PKH Invalid</dt>
+                    <dd className="font-extrabold text-red-700">
+                      {breakdown.pkhInvalid} resi
+                    </dd>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">EC3 Invalid</dt>
+                    <dd className="font-extrabold text-red-700">
+                      {breakdown.ec3Invalid} resi
+                    </dd>
+                  </div>
+                </dl>
+              )}
+            </div>
+            <div className="cf-card p-4 text-center">
+              <p
+                className={cn(
+                  "text-2xl font-extrabold",
+                  result.isValid ? "text-emerald-600" : "text-amber-600"
+                )}
+              >
+                {result.isValid ? "VALID" : "BERMASALAH"}
+              </p>
+              <p className="mt-1 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+                Status Berkas
+              </p>
+            </div>
           </section>
 
           {result.fileIssues.length > 0 && (

@@ -156,7 +156,7 @@ describe("getResiList", () => {
 });
 
 describe("updateFollowUpStatus", () => {
-  it("payload lengkap + kembalikan baris", async () => {
+  it("payload lengkap + kembalikan baris (catatan jadi riwayat)", async () => {
     const captured: Captured = { eqs: [] };
     const updated = { ...ROW, status_followup: "SUDAH_FOLLOWUP" };
     const out = await updateFollowUpStatus(
@@ -165,23 +165,53 @@ describe("updateFollowUpStatus", () => {
     );
     expect(out).toEqual(updated);
     expect(captured.table).toBe("resi");
-    expect(captured.eqs).toEqual([["id", 491]]);
+    // Baca riwayat lama (eq) + update (eq).
+    expect(captured.eqs).toEqual([
+      ["id", 491],
+      ["id", 491],
+    ]);
     expect(captured.singleCalled).toBe(true);
     const payload = captured.updatePayload as Record<string, unknown>;
     expect(payload.status_followup).toBe("SUDAH_FOLLOWUP");
-    expect(payload.catatan_followup).toBe("Hubungi agen");
+    const log = payload.catatan_followup as string;
+    expect(log).toMatch(/^\[\d{2}\/\d{2}\/\d{4} \d{2}:\d{2} - Aldi\]: Hubungi agen$/);
     expect(payload.followed_up_by).toBe("Aldi");
     expect(typeof payload.followed_up_at).toBe("string");
     expect(payload).not.toHaveProperty("status_fu");
   });
 
-  it("catatan kosong -> null; validasi id/user/status", async () => {
+  it("catatan baru digabung di atas riwayat lama", async () => {
     const captured: Captured = { eqs: [] };
+    const existing = "[22/09/2026 14:00 - Helpdesk]: Resi baru masuk.";
     await updateFollowUpStatus(
-      fakeClient([{ data: ROW }], captured),
+      fakeClient(
+        [
+          { data: { catatan_followup: existing } },
+          { data: { ...ROW, status_followup: "SUDAH_FOLLOWUP" } },
+        ],
+        captured
+      ),
+      { id: 1, status: "SUDAH_FOLLOWUP", catatan: "Paket diambil", userName: "Budi" }
+    );
+    const log = (
+      captured.updatePayload as Record<string, unknown>
+    ).catatan_followup as string;
+    expect(log).toContain("Paket diambil");
+    expect(log).toContain("----------------------------------------");
+    expect(log).toContain(existing);
+    expect(log.indexOf("Paket diambil")).toBeLessThan(log.indexOf(existing));
+  });
+
+  it("catatan kosong -> riwayat dipertahankan; validasi id/user/status", async () => {
+    const captured: Captured = { eqs: [] };
+    const existing = "[22/09/2026 14:00 - Helpdesk]: Resi baru masuk.";
+    await updateFollowUpStatus(
+      fakeClient([{ data: { catatan_followup: existing } }], captured),
       { id: 1, status: "SUDAH_FOLLOWUP", catatan: "   ", userName: "Budi" }
     );
-    expect((captured.updatePayload as Record<string, unknown>).catatan_followup).toBeNull();
+    expect((captured.updatePayload as Record<string, unknown>).catatan_followup).toBe(
+      existing
+    );
 
     const noop = fakeClient([{ data: ROW }], { eqs: [] });
     await expect(
@@ -195,7 +225,7 @@ describe("updateFollowUpStatus", () => {
     ).rejects.toThrow("tidak valid");
   });
 
-  it("error update: log [resi:update-followup] + throw", async () => {
+  it("error baca riwayat: log [resi:read-catatan] + throw", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const err = { code: "PGRST204", message: "schema cache" };
@@ -208,7 +238,7 @@ describe("updateFollowUpStatus", () => {
           userName: "B",
         })
       ).rejects.toBe(err);
-      expect(String(spy.mock.calls[0]?.[0])).toContain("[resi:update-followup]");
+      expect(String(spy.mock.calls[0]?.[0])).toContain("[resi:read-catatan]");
     } finally {
       spy.mockRestore();
     }
