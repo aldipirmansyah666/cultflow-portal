@@ -52,18 +52,30 @@ export interface AuthResult {
   needsRehash: boolean;
 }
 
-/** Validasi + normalisasi role (selain ADMIN dipaksa USER). */
+/**
+ * Validasi + normalisasi role, case-insensitive.
+ * "ADMIN"/"admin"/" Admin " -> "ADMIN"; selain itu dipaksa "USER".
+ * Ini titik kanonis — semua pembanding role harus lewat sini / isAdminRole().
+ */
 export function normalizeRole(role: unknown): UserRole {
-  return role === "ADMIN" ? "ADMIN" : "USER";
+  if (typeof role === "string" && role.trim().toUpperCase() === "ADMIN") {
+    return "ADMIN";
+  }
+  return "USER";
 }
 
-/** Buang password sebelum data keluar ke browser. */
+/** True bila role adalah ADMIN (case-insensitive, toleran spasi). */
+export function isAdminRole(role: unknown): boolean {
+  return normalizeRole(role) === "ADMIN";
+}
+
+/** Buang password sebelum data keluar ke browser (role selalu dinormalisasi). */
 export function toSafeUser(user: DbUser): SafeUser {
   return {
     id: user.id,
     name: user.name,
     username: user.username,
-    role: user.role,
+    role: normalizeRole(user.role),
     created_at: user.created_at,
   };
 }
@@ -141,8 +153,14 @@ export async function updateUser(
   if (typeof patch.name === "string" && patch.name.trim() !== "") {
     payload.name = patch.name.trim();
   }
-  if (patch.role === "ADMIN" || patch.role === "USER") {
-    payload.role = patch.role;
+  if (typeof patch.role === "string") {
+    // Terima "admin"/"user" campuran huruf dari client, simpan kanonis UPPER.
+    const normalized = normalizeRole(patch.role);
+    // Hanya tulis bila input memang role yang dikenal (hindari menimpa
+    // dengan USER saat client mengirim sampah — validasi di API route).
+    if (patch.role.trim().toUpperCase() === "ADMIN" || patch.role.trim().toUpperCase() === "USER") {
+      payload.role = normalized;
+    }
   }
   if (
     typeof patch.passwordHash === "string" &&

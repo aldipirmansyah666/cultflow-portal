@@ -28,7 +28,10 @@ export function LayoutShell({ children }: LayoutShellProps) {
   const [role, setRole] = useState<string | null>(null);
   const pathname = usePathname();
 
-  // Muat role sekali saat mount (callback async = aman dari aturan lint).
+  // Muat role sekali saat mount. Dinormalisasi ke UPPER agar
+  // "admin" kecil dari DB/token lama tetap membuka menu ADMIN.
+  // Sumber Tunggal Kebenaran = /api/auth/me (JWT server). Mock
+  // localStorage "cum:mock-role" SENGAJA tidak dibaca di sini.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -37,7 +40,7 @@ export function LayoutShell({ children }: LayoutShellProps) {
         if (!res.ok) return;
         const body = (await res.json()) as { user?: { role?: string } };
         if (!cancelled && typeof body.user?.role === "string") {
-          setRole(body.user.role);
+          setRole(body.user.role.trim().toUpperCase());
         }
       } catch {
         // abaikan: menu terbatas tetap tersembunyi

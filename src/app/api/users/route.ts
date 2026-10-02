@@ -5,7 +5,7 @@
 
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
-import { getSession } from "@/lib/session";
+import { getSession, isAdminSession } from "@/lib/session";
 import { hashPassword } from "@/lib/password";
 import {
   createUser,
@@ -19,7 +19,9 @@ import {
 
 async function requireAdmin() {
   const session = await getSession();
-  if (!session || session.role !== "ADMIN") return null;
+  // Case-insensitive via isAdminSession(); getSession() sudah normalisasi,
+  // ini melapisi token lama / peran huruf kecil.
+  if (!isAdminSession(session)) return null;
   return session;
 }
 

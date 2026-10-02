@@ -17,6 +17,26 @@ export interface SessionPayload {
   role: "ADMIN" | "USER";
 }
 
+/**
+ * Normalisasi role sesi, case-insensitive.
+ * Didefinisikan di sini (bukan impor userService) agar session.ts tetap
+ * ringan untuk Edge/proxy tanpa menarik dependency Supabase.
+ */
+export function normalizeSessionRole(role: unknown): "ADMIN" | "USER" {
+  if (typeof role === "string" && role.trim().toUpperCase() === "ADMIN") {
+    return "ADMIN";
+  }
+  return "USER";
+}
+
+/** True bila sesi/payload memiliki hak ADMIN (case-insensitive). */
+export function isAdminSession(
+  session: { role?: unknown } | null | undefined
+): boolean {
+  if (!session) return false;
+  return normalizeSessionRole(session.role) === "ADMIN";
+}
+
 function getJwtSecret(): Uint8Array {
   const secret = process.env.JWT_SECRET;
   if (!secret) {
@@ -32,24 +52,33 @@ function getJwtSecret(): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-/** Buat token sesi JWT HS256 untuk payload user. */
+/** Buat token sesi JWT HS256 untuk payload user (role dinormalisasi). */
 export async function createSessionToken(
   payload: SessionPayload
 ): Promise<string> {
-  return new SignJWT({ ...payload })
+  const normalized: SessionPayload = {
+    ...payload,
+    role: normalizeSessionRole(payload.role),
+  };
+  return new SignJWT({ ...normalized })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(TOKEN_EXPIRY)
     .sign(getJwtSecret());
 }
 
-/** Verifikasi token sesi; null bila tidak valid/kedaluwarsa. */
+/**
+ * Verifikasi token sesi; null bila tidak valid/kedaluwarsa.
+ * Role hasil verifikasi SELALU dinormalisasi (menyelamatkan token lama
+ * yang sempat menyimpan "admin" huruf kecil).
+ */
 export async function verifySessionToken(
   token: string
 ): Promise<SessionPayload | null> {
   try {
     const { payload } = await jwtVerify(token, getJwtSecret());
-    return payload as unknown as SessionPayload;
+    const session = payload as unknown as SessionPayload;
+    return { ...session, role: normalizeSessionRole(session.role) };
   } catch {
     return null;
   }

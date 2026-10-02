@@ -9,6 +9,7 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { getSession } from "@/lib/session";
 import {
+  classifyResiDbError,
   deleteResiBatch,
   getResiList,
   importResiBatch,
@@ -75,9 +76,16 @@ export async function GET(req: Request) {
     });
     return NextResponse.json(result);
   } catch (e) {
+    // Tabel kosong -> 200 + [] (ditangani normal di atas) sehingga halaman
+    // menampilkan state "Belum ada data resi."; blok ini HANYA untuk error
+    // infra (tabel belum dimigrasi / RLS) yang dipetakan jadi pesan jelas.
+    const classified = classifyResiDbError(
+      e as { code?: unknown; message?: unknown },
+      e instanceof Error ? e.message : "Gagal memuat resi"
+    );
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Gagal memuat resi" },
-      { status: 500 }
+      { error: classified.message, code: classified.code },
+      { status: classified.status }
     );
   }
 }

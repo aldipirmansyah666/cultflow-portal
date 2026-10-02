@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  classifyResiDbError,
   getResiList,
   isFollowedUp,
   normalizeFollowUpStatus,
@@ -243,5 +244,30 @@ describe("updateFollowUpStatus", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("classifyResiDbError (pesan DB actionable)", () => {
+  it("tabel hilang -> 503 MIGRATION_MISSING + instruksi migrasi", () => {
+    const missing = classifyResiDbError(
+      { code: "42P01", message: 'relation "public.resi" does not exist' },
+      "fallback"
+    );
+    expect(missing.status).toBe(503);
+    expect(missing.code).toBe("MIGRATION_MISSING");
+    expect(missing.message).toContain("20260921000000_init_schema.sql");
+  });
+
+  it("RLS ditolak -> 503 RLS_DENIED", () => {
+    const rls = classifyResiDbError(
+      { code: "42501", message: "permission denied for table resi" },
+      "fallback"
+    );
+    expect(rls).toMatchObject({ status: 503, code: "RLS_DENIED" });
+  });
+
+  it("error lain -> 500 DB_ERROR dengan pesan asli", () => {
+    const generic = classifyResiDbError({ code: "XX000", message: "boom" }, "fallback");
+    expect(generic).toMatchObject({ status: 500, code: "DB_ERROR", message: "boom" });
   });
 });

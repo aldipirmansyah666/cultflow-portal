@@ -263,8 +263,9 @@ export default async function DashboardPage() {
                 • Pelimpahan bailout sebelum pukul 09.00 WIB (hari kerja).
               </li>
               <li>
-                • Resi EC3 wajib berprefix SHPE/P260; PKH wajib
-                P260/TTSPOS/26MNG — cek via Reconcile Validator.
+                • Resi EC3 wajib berprefix SHPE/P26; PKH, PE, & PJB berbagi
+                awalan P26/TTSPOS/26MNG/26KOM/26EVP/26ASD/26; P260 (P26)
+                — cek via Reconcile Validator.
               </li>
             </ul>
           </div>

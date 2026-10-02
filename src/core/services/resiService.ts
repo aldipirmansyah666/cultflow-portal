@@ -51,6 +51,74 @@ const FOLLOWUP_PENDING = "BELUM_FOLLOWUP";
 const FOLLOWUP_PROGRESS = "PROSES_FOLLOWUP";
 const FOLLOWUP_DONE = "SUDAH_FOLLOWUP";
 
+// ---------------------------------------------------------------------------
+// Klasifikasi error DB (agar halaman Monitoring tidak blank tanpa indikasi:
+// tabel belum dimigrasi -> 503 + instruksi, RLS -> 503 + instruksi).
+// ---------------------------------------------------------------------------
+
+interface DbErrorLike {
+  code?: unknown;
+  message?: unknown;
+  details?: unknown;
+  hint?: unknown;
+}
+
+export interface ClassifiedResiDbError {
+  /** HTTP status yang disarankan (503 bila infra/belum migrasi). */
+  status: number;
+  /** Kode mesin untuk branching di client ("MIGRATION_MISSING", ...). */
+  code: string;
+  message: string;
+}
+
+/**
+ * Petakan error Supabase/PostgREST mentah menjadi pesan JSON yang jelas.
+ * Tabel `resi` dibuat migration 20260921000000_init_schema.sql — bila
+ * belum di-apply, PostgREST melempar 42P01/PGRST205 yang sebelumnya
+ * bocor sebagai 500 generik.
+ */
+export function classifyResiDbError(
+  error: DbErrorLike | null | undefined,
+  fallback: string
+): ClassifiedResiDbError {
+  const code = typeof error?.code === "string" ? error.code : "";
+  const text = [error?.message, error?.details, error?.hint]
+    .filter((v): v is string => typeof v === "string")
+    .join(" | ");
+  const message =
+    (typeof error?.message === "string" && error.message) || fallback;
+
+  if (
+    code === "42P01" ||
+    code === "PGRST205" ||
+    /relation .* does not exist|table .* does not exist|could not find the table/i.test(
+      `${code} ${text}`
+    )
+  ) {
+    return {
+      status: 503,
+      code: "MIGRATION_MISSING",
+      message:
+        "Tabel resi belum tersedia. Jalankan migration " +
+        "20260921000000_init_schema.sql (supabase db push), lalu coba lagi.",
+    };
+  }
+  if (
+    code === "42501" ||
+    code === "PGRST301" ||
+    /permission denied|row-level security|not authorized/i.test(`${code} ${text}`)
+  ) {
+    return {
+      status: 503,
+      code: "RLS_DENIED",
+      message:
+        "Akses database ditolak untuk tabel resi (RLS/GRANT). " +
+        "Pastikan API memakai service_role.",
+    };
+  }
+  return { status: 500, code: "DB_ERROR", message };
+}
+
 /**
  * Catatan berisi deliv/delivered/retur otomatis menutup resi (CLOSE =
  * SUDAH_FOLLOWUP + flag is_selesai + stempel closed_at).

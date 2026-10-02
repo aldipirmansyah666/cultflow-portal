@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import {
+  isAdminSession,
   isPublicPath,
   SESSION_COOKIE_NAME,
   verifySessionToken,
@@ -42,9 +43,12 @@ export async function proxy(req: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // Gate ADMIN case-insensitive via isAdminSession() — "ADMIN"/"admin"
+  // lolos, USER/tamu diredirect ke dashboard. verifySessionToken() sudah
+  // menormalisasi role, ini lapis pertahanan kedua untuk token lama.
   if (
     ADMIN_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`)) &&
-    session.role !== "ADMIN"
+    !isAdminSession(session)
   ) {
     return NextResponse.redirect(new URL("/", req.url));
   }

@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>diagram.md</title>
+<meta http-equiv="Content-type" content="text/html;charset=UTF-8">
+
+<style>
+/* https://github.com/microsoft/vscode/blob/master/extensions/markdown-language-features/media/markdown.css */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+body {
+	font-family: var(--vscode-markdown-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif);
+	font-size: var(--vscode-markdown-font-size, 14px);
+	padding: 0 26px;
+	line-height: var(--vscode-markdown-line-height, 22px);
+	word-wrap: break-word;
+}
+
+#code-csp-warning {
+	position: fixed;
+	top: 0;
+	right: 0;
+	color: white;
+	margin: 16px;
+	text-align: center;
+	font-size: 12px;
+	font-family: sans-serif;
+	background-color:#444444;
+	cursor: pointer;
+	padding: 6px;
+	box-shadow: 1px 1px 1px rgba(0,0,0,.25);
+}
+
+#code-csp-warning:hover {
+	text-decoration: none;
+	background-color:#007acc;
+	box-shadow: 2px 2px 2px rgba(0,0,0,.25);
+}
+
+body.scrollBeyondLastLine {
+	margin-bottom: calc(100vh - 22px);
+}
+
+body.showEditorSelection .code-line {
+	position: relative;
+}
+
+body.showEditorSelection .code-active-line:before,
+body.showEditorSelection .code-line:hover:before {
+	content: "";
+	display: block;
+	position: absolute;
+	top: 0;
+	left: -12px;
+	height: 100%;
+}
+
+body.showEditorSelection li.code-active-line:before,
+body.showEditorSelection li.code-line:hover:before {
+	left: -30px;
+}
+
+.vscode-light.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.15);
+}
+
+.vscode-light.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(0, 0, 0, 0.40);
+}
+
+.vscode-light.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-dark.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.4);
+}
+
+.vscode-dark.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 255, 255, 0.60);
+}
+
+.vscode-dark.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+.vscode-high-contrast.showEditorSelection .code-active-line:before {
+	border-left: 3px solid rgba(255, 160, 0, 0.7);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line:hover:before {
+	border-left: 3px solid rgba(255, 160, 0, 1);
+}
+
+.vscode-high-contrast.showEditorSelection .code-line .code-line:hover:before {
+	border-left: none;
+}
+
+img {
+	max-width: 100%;
+	max-height: 100%;
+}
+
+a {
+	text-decoration: none;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+a:focus,
+input:focus,
+select:focus,
+textarea:focus {
+	outline: 1px solid -webkit-focus-ring-color;
+	outline-offset: -1px;
+}
+
+hr {
+	border: 0;
+	height: 2px;
+	border-bottom: 2px solid;
+}
+
+h1 {
+	padding-bottom: 0.3em;
+	line-height: 1.2;
+	border-bottom-width: 1px;
+	border-bottom-style: solid;
+}
+
+h1, h2, h3 {
+	font-weight: normal;
+}
+
+table {
+	border-collapse: collapse;
+}
+
+table > thead > tr > th {
+	text-align: left;
+	border-bottom: 1px solid;
+}
+
+table > thead > tr > th,
+table > thead > tr > td,
+table > tbody > tr > th,
+table > tbody > tr > td {
+	padding: 5px 10px;
+}
+
+table > tbody > tr + tr > td {
+	border-top: 1px solid;
+}
+
+blockquote {
+	margin: 0 7px 0 5px;
+	padding: 0 16px 0 10px;
+	border-left-width: 5px;
+	border-left-style: solid;
+}
+
+code {
+	font-family: Menlo, Monaco, Consolas, "Droid Sans Mono", "Courier New", monospace, "Droid Sans Fallback";
+	font-size: 1em;
+	line-height: 1.357em;
+}
+
+body.wordWrap pre {
+	white-space: pre-wrap;
+}
+
+pre:not(.hljs),
+pre.hljs code > div {
+	padding: 16px;
+	border-radius: 3px;
+	overflow: auto;
+}
+
+pre code {
+	color: var(--vscode-editor-foreground);
+	tab-size: 4;
+}
+
+/** Theming */
+
+.vscode-light pre {
+	background-color: rgba(220, 220, 220, 0.4);
+}
+
+.vscode-dark pre {
+	background-color: rgba(10, 10, 10, 0.4);
+}
+
+.vscode-high-contrast pre {
+	background-color: rgb(0, 0, 0);
+}
+
+.vscode-high-contrast h1 {
+	border-color: rgb(0, 0, 0);
+}
+
+.vscode-light table > thead > tr > th {
+	border-color: rgba(0, 0, 0, 0.69);
+}
+
+.vscode-dark table > thead > tr > th {
+	border-color: rgba(255, 255, 255, 0.69);
+}
+
+.vscode-light h1,
+.vscode-light hr,
+.vscode-light table > tbody > tr + tr > td {
+	border-color: rgba(0, 0, 0, 0.18);
+}
+
+.vscode-dark h1,
+.vscode-dark hr,
+.vscode-dark table > tbody > tr + tr > td {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+</style>
+
+<style>
+/* Tomorrow Theme */
+/* http://jmblog.github.com/color-themes-for-google-code-highlightjs */
+/* Original theme - https://github.com/chriskempson/tomorrow-theme */
+
+/* Tomorrow Comment */
+.hljs-comment,
+.hljs-quote {
+	color: #8e908c;
+}
+
+/* Tomorrow Red */
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion {
+	color: #c82829;
+}
+
+/* Tomorrow Orange */
+.hljs-number,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link {
+	color: #f5871f;
+}
+
+/* Tomorrow Yellow */
+.hljs-attribute {
+	color: #eab700;
+}
+
+/* Tomorrow Green */
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition {
+	color: #718c00;
+}
+
+/* Tomorrow Blue */
+.hljs-title,
+.hljs-section {
+	color: #4271ae;
+}
+
+/* Tomorrow Purple */
+.hljs-keyword,
+.hljs-selector-tag {
+	color: #8959a8;
+}
+
+.hljs {
+	display: block;
+	overflow-x: auto;
+	color: #4d4d4c;
+	padding: 0.5em;
+}
+
+.hljs-emphasis {
+	font-style: italic;
+}
+
+.hljs-strong {
+	font-weight: bold;
+}
+</style>
+
+<style>
+/*
+ * Markdown PDF CSS
+ */
+
+ body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", "Ubuntu", "Droid Sans", sans-serif, "Meiryo";
+	padding: 0 12px;
+}
+
+pre {
+	background-color: #f8f8f8;
+	border: 1px solid #cccccc;
+	border-radius: 3px;
+	overflow-x: auto;
+	white-space: pre-wrap;
+	overflow-wrap: break-word;
+}
+
+pre:not(.hljs) {
+	padding: 23px;
+	line-height: 19px;
+}
+
+blockquote {
+	background: rgba(127, 127, 127, 0.1);
+	border-color: rgba(0, 122, 204, 0.5);
+}
+
+.emoji {
+	height: 1.4em;
+}
+
+code {
+	font-size: 14px;
+	line-height: 19px;
+}
+
+/* for inline code */
+:not(pre):not(.hljs) > code {
+	color: #C9AE75; /* Change the old color so it seems less like an error */
+	font-size: inherit;
+}
+
+/* Page Break : use <div class="page"/> or <div class="page"></div> to insert page break
+-------------------------------------------------------- */
+.page {
+	page-break-after: always;
+}
+
+</style>
+
+<script src="https://unpkg.com/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <script>
+    mermaid.initialize({
+      startOnLoad: true,
+      theme: document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast')
+          ? 'dark'
+          : 'default'
+    });
+  </script>
+<h1 id="dokumentasi-diagram-arsitektur--flowchart-fitur-system-presisi-base-code">Dokumentasi Diagram Arsitektur &amp; Flowchart Fitur System (Presisi Base Code)</h1>
+<h2 id="diagram-1-overview-seluruh-fitur-dfd-level-1">DIAGRAM 1: OVERVIEW SELURUH FITUR (DFD LEVEL 1)</h2>
+<pre><code class="language-mermaid"><div class="mermaid">flowchart TD
+    subgraph AKTOR ["Aktor"]
+        MITRA["User dan Agen"]
+        ADMIN["Admin"]
+    end
+
+    subgraph FE ["Frontend Next.js App Router"]
+        P_LOGIN["app login page"]
+        P_DASH["app page Dashboard"]
+        P_RESI["app monitoring-resi page"]
+        P_UTAMA["app data-utama page"]
+        P_LOOKUP["app lookup-agen page"]
+        P_BAG["app bagging page"]
+        P_BAIL["app bailout page"]
+        P_REC["app reconcile page"]
+        P_USER["app user-management page"]
+    end
+
+    subgraph BE ["Backend API Routes"]
+        A_LOGIN["api auth login route"]
+        A_ME["api auth me route"]
+        A_LOGOUT["api auth logout route"]
+        A_RESI["api resi route"]
+        A_USERS["api users route"]
+        A_IMPORT["api data-utama import route"]
+    end
+
+    subgraph LIB ["Lib dan Service"]
+        PROXY["proxy.ts guard session dan role"]
+        SESS["lib session.ts JWT cookie"]
+        SVC_USER["core services userService"]
+        SVC_RESI["core services resiService"]
+        SVC_UTAMA["core services dataUtamaService"]
+        SVC_DASH["core services dashboardService"]
+    end
+
+    subgraph DB ["Supabase Postgres"]
+        T_USERS["public.users"]
+        T_RESI["public.resi"]
+        T_UTAMA["public.data_lengkap_utama"]
+        T_BAIL["public.bailout"]
+    end
+
+    MITRA --> P_LOGIN
+    MITRA --> P_DASH
+    MITRA --> P_RESI
+    MITRA --> P_BAG
+    MITRA --> P_BAIL
+    MITRA --> P_REC
+    ADMIN --> P_USER
+    ADMIN --> P_UTAMA
+
+    P_LOGIN --> A_LOGIN
+    P_DASH --> SVC_DASH
+    P_RESI --> A_RESI
+    P_USER --> A_USERS
+    P_UTAMA --> A_IMPORT
+
+    PROXY --> SESS
+    A_LOGIN --> SVC_USER
+    A_ME --> SESS
+    A_RESI --> SVC_RESI
+    A_USERS --> SVC_USER
+    A_IMPORT --> SVC_UTAMA
+
+    SVC_USER --> T_USERS
+    SVC_RESI --> T_RESI
+    SVC_UTAMA --> T_UTAMA
+    SVC_DASH --> T_UTAMA
+    SVC_DASH --> T_RESI
+    SVC_DASH --> T_BAIL
+</div></code></pre>
+<hr>
+<h2 id="diagram-2-flowchart-modul-resi-monitoring-dan-follow-up">DIAGRAM 2: FLOWCHART MODUL RESI (Monitoring dan Follow-Up)</h2>
+<pre><code class="language-mermaid"><div class="mermaid">graph TD
+    R0["Mulai - Session via getSession"] --> R1["GET api resi - status q page pageSize startDate endDate"]
+    R1 --> R2["Validasi 401 bila tanpa sesi"]
+    R2 --> R3["purgeExpiredResi fire-and-forget lebih dari 2 hari"]
+    R3 --> R4["getResiList - filter belum sudah selesai plus search no_resi agen"]
+    R4 --> R5["Render monitoring-resi page - badge pengiriman dan follow-up"]
+    R5 --> R6["Aksi - Import Copas atau Update Status atau Follow-up atau Hapus"]
+    R6 --> R7["POST api resi - parseResiCopasText dan sanitizeNomorResi"]
+    R7 --> R8["importResiBatch check-merge - lindungi SUDAH_FOLLOWUP"]
+    R6 --> R9["PATCH api resi - updateFollowUpStatus atau updateResiStatus"]
+    R9 --> R10["Cek autoClose deliv delivered retur - SELESAI wajib catatan"]
+    R10 --> R11["appendHistoryLog entri baru di atas plus closed_at bila tutup"]
+    R6 --> R12["DELETE api resi - deleteResiBatch chunk 500"]
+    R8 --> R13["Selesai"]
+    R11 --> R13
+    R12 --> R13
+</div></code></pre>
+<hr>
+<h2 id="diagram-3-flowchart-modul-data-utama-import">DIAGRAM 3: FLOWCHART MODUL DATA-UTAMA IMPORT</h2>
+<pre><code class="language-mermaid"><div class="mermaid">graph TD
+    D0["Mulai - Admin login"] --> D1["Buka app data-utama page"]
+    D1 --> D2["Upload Excel Agen CUM - cek magic-bytes dan size"]
+    D2 --> D3["POST api data-utama import - matrix - khusus ADMIN 403 bila USER"]
+    D3 --> D4["Cek IMPORT_MAX_ROWS dan IMPORT_MAX_COLS"]
+    D4 --> D5["findHeaderRowIndex - deteksi baris header"]
+    D5 --> D6["mapAgenCumRowByIndex per baris"]
+    D6 --> D7["dedupeByPpid - PPID menang terakhir"]
+    D7 --> D8["fetchRemoteColumns plus resolveAllowedColumns"]
+    D8 --> D9["sanitizeRowForDb - buang kolom tak dikenal"]
+    D9 --> D10["Upsert service_role onConflict ppid ke data_lengkap_utama"]
+    D10 --> D11["Kembalikan summary inserted updated skipped"]
+    D11 --> D12["Dashboard update agenTotal via getDashboardStats"]
+</div></code></pre>
+<hr>
+<h2 id="diagram-4-flowchart-modul-keagenan-bagging-bailout-reconcile--lookup">DIAGRAM 4: FLOWCHART MODUL KEAGENAN (Bagging, Bailout, Reconcile &amp; Lookup)</h2>
+<pre><code class="language-mermaid"><div class="mermaid">graph TD
+    K0["Mulai - app bagging atau bailout atau reconcile atau lookup-agen"] --> K1["Pilih modul keagenan"]
+    K1 -- Bagging --> K2["Upload multi Excel - parseBaggingRowsFromAOA"]
+    K2 --> K3["findBaggingColumnIndices via alias Tanggal Resi Agen Layanan Status"]
+    K3 --> K4["groupBaggingByAgen"]
+    K4 --> K5["lookupAgenByPpid ke data_lengkap_utama"]
+    K5 --> K6["buildBaggingMessage plus buildBaggingWaUrl - kirim WA"]
+    K1 -- Bailout --> K7["Input Excel atau Paste - parseBailoutRowsFromAOA"]
+    K7 --> K8["normalizeKodeLoket plus cleanBailoutValue Rp - skip TOTAL"]
+    K8 --> K9["buildBailoutMessage Sunda-formal H-1 - export CSV"]
+    K1 -- Reconcile --> K10["Upload Excel produk plus nomor_resi"]
+    K10 --> K11["validateReconcileRows - EC3 SHPE P260 - PKH P260 TTSPOS 26MNG"]
+    K11 --> K12["Cek coverage file PKH wajib P260 dan TTSPOS"]
+    K1 -- Lookup --> K13["Cari PPID atau nama loket di data_lengkap_utama"]
+    K6 --> KZ["Selesai - tanpa insert resi otomatis"]
+    K9 --> KZ
+    K12 --> KZ
+    K13 --> KZ
+</div></code></pre>
+<hr>
+<h2 id="diagram-5-flowchart-modul-admin-backoffice--auth">DIAGRAM 5: FLOWCHART MODUL ADMIN BACKOFFICE &amp; AUTH</h2>
+<pre><code class="language-mermaid"><div class="mermaid">graph TD
+    M0["Mulai - POST api auth login"] --> M1["Rate-limit 5 per menit per IP"]
+    M1 --> M2["authenticateUser di public.users via service_role"]
+    M2 --> M3["verifyPassword bcrypt atau SHA-256 legacy"]
+    M3 --> M4["Auto-rehash legacy ke bcrypt bila needsRehash"]
+    M4 --> M5["createSessionToken HS256 plus setSessionCookie cultflow_session"]
+    M5 --> M6["proxy.ts - isPublicPath dan ADMIN_PREFIXES"]
+    M6 --> M7{"Role ADMIN?"}
+    M7 -- Bukan --> M8["Redirect ke home - tolak api users dan import 403"]
+    M7 -- Ya --> M9["app user-management page"]
+    M9 --> M10["GET POST PATCH DELETE api users - toSafeUser - larang hapus diri"]
+    M7 -- Ya --> M11["POST api data-utama import - upsert ppid"]
+    M7 -- Ya --> M12["app monitoring-resi page - hapus batch dan purge"]
+    M10 --> M13["Selesai - audit via logSupabaseError"]
+    M11 --> M13
+    M12 --> M13
+</div></code></pre>
+
+</body>
+</html>

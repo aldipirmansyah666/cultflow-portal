@@ -81,3 +81,44 @@ body {
     border-radius: 0 !important;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* PT. Cipta Usaha Makmur — high-tech dark corporate theme (aditif).   */
+/* Dipakai via wrapper `.cum-dark` di LayoutShell agar tema terang     */
+/* legacy tetap utuh. Glassmorphism + aksen cyan/emerald.              */
+/* ------------------------------------------------------------------ */
+.cum-dark {
+  --cum-bg: #0f172a; /* slate-900 */
+  --cum-panel: rgb(15 23 42 / 0.72);
+  color-scheme: dark;
+}
+
+.cum-dark-bg {
+  background:
+    radial-gradient(1200px 500px at 15% -10%, rgb(34 211 238 / 0.14), transparent 60%),
+    radial-gradient(900px 420px at 90% 0%, rgb(16 185 129 / 0.12), transparent 55%),
+    linear-gradient(to bottom, #0b1220, #0f172a 45%, #0b1220);
+}
+
+.cum-glass {
+  background: linear-gradient(to bottom, rgb(30 41 59 / 0.72), rgb(15 23 42 / 0.78));
+  border: 1px solid rgb(148 163 184 / 0.18);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.6);
+}
+
+.cum-card {
+  border: 1px solid rgb(148 163 184 / 0.16);
+  border-radius: 0.9rem;
+  background: linear-gradient(to bottom, rgb(30 41 59 / 0.66), rgb(15 23 42 / 0.82));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.cum-grid-bg {
+  background-image:
+    linear-gradient(to right, rgb(148 163 184 / 0.07) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(148 163 184 / 0.07) 1px, transparent 1px);
+  background-size: 28px 28px;
+}

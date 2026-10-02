@@ -706,9 +706,18 @@ export default function MonitoringResiPage() {
                 ) : rows.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="px-4 py-12 text-center text-sm text-slate-500">
-                      {tab === "semua" && debouncedSearch === ""
-                        ? "Belum ada data resi."
-                        : "Tidak ada resi yang cocok dengan filter."}
+                      {tab === "semua" && debouncedSearch === "" ? (
+                        <>
+                          <p className="font-semibold text-slate-700">Belum ada data resi.</p>
+                          <p className="mx-auto mt-1 max-w-md text-xs leading-relaxed">
+                            Tabel resi masih kosong. Tambahkan data melalui tombol
+                            &ldquo;Import / Copas Text&rdquo; di atas atau pastikan
+                            hasil unggahan data logistik sudah masuk.
+                          </p>
+                        </>
+                      ) : (
+                        "Tidak ada resi yang cocok dengan filter."
+                      )}
                     </td>
                   </tr>
                 ) : (

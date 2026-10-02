@@ -127,8 +127,10 @@ export default function ReconcilePage() {
             </h1>
             <p className="mt-1 text-sm text-blue-100">
               Unggah berkas Excel/CSV berisi kolom Produk &amp; Nomor Resi
-              untuk validasi prefix EC3 (SHPE/P260) &amp; PKH
-              (P260/TTSPOS/26MNG).
+              untuk validasi prefix produk EC3 (SHPE/P26), PKH, PE, &amp;
+              PJB (ketiganya berbagi daftar awalan yang sama: P26, TTSPOS,
+              26MNG, 26KOM, 26EVP, 26ASD, 26), serta P260 (P26) &amp;
+              TTSPOS (TTSPOS).
             </p>
           </div>
         </div>
@@ -207,9 +209,13 @@ export default function ReconcilePage() {
                     </dd>
                   </div>
                   <dd className="font-mono text-[11px] text-slate-500">
-                    P260: {breakdown.pkhValidByPrefix.P260} • TTSPOS:{" "}
+                    P26: {breakdown.pkhValidByPrefix.P26} • TTSPOS:{" "}
                     {breakdown.pkhValidByPrefix.TTSPOS} • 26MNG:{" "}
-                    {breakdown.pkhValidByPrefix["26MNG"]}
+                    {breakdown.pkhValidByPrefix["26MNG"]} • 26Lainnya:{" "}
+                    {breakdown.pkhValidByPrefix["26KOM"] +
+                      breakdown.pkhValidByPrefix["26EVP"] +
+                      breakdown.pkhValidByPrefix["26ASD"] +
+                      breakdown.pkhValidByPrefix["26"]}
                   </dd>
                   <div className="flex items-baseline justify-between gap-2">
                     <dt className="font-semibold text-slate-600">EC3 Valid</dt>
@@ -218,9 +224,21 @@ export default function ReconcilePage() {
                     </dd>
                   </div>
                   <dd className="font-mono text-[11px] text-slate-500">
-                    SHPE: {breakdown.ec3ValidByPrefix.SHPE} • P260:{" "}
-                    {breakdown.ec3ValidByPrefix.P260}
+                    SHPE: {breakdown.ec3ValidByPrefix.SHPE} • P26:{" "}
+                    {breakdown.ec3ValidByPrefix.P26}
                   </dd>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">PE Valid</dt>
+                    <dd className="font-extrabold text-emerald-700">
+                      {breakdown.peValid} resi
+                    </dd>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">PJB Valid</dt>
+                    <dd className="font-extrabold text-emerald-700">
+                      {breakdown.pjbValid} resi
+                    </dd>
+                  </div>
                 </dl>
               )}
             </div>
@@ -243,6 +261,18 @@ export default function ReconcilePage() {
                     <dt className="font-semibold text-slate-600">EC3 Invalid</dt>
                     <dd className="font-extrabold text-red-700">
                       {breakdown.ec3Invalid} resi
+                    </dd>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">PE Invalid</dt>
+                    <dd className="font-extrabold text-red-700">
+                      {breakdown.peInvalid} resi
+                    </dd>
+                  </div>
+                  <div className="flex items-baseline justify-between gap-2">
+                    <dt className="font-semibold text-slate-600">PJB Invalid</dt>
+                    <dd className="font-extrabold text-red-700">
+                      {breakdown.pjbInvalid} resi
                     </dd>
                   </div>
                 </dl>

@@ -70,9 +70,11 @@ function fakeClient(
 }
 
 describe("normalizeRole / toSafeUser", () => {
-  it("hanya ADMIN yang lolos, password dibuang", () => {
+  it("hanya ADMIN yang lolos (case-insensitive), password dibuang", () => {
     expect(normalizeRole("ADMIN")).toBe("ADMIN");
-    expect(normalizeRole("admin")).toBe("USER");
+    expect(normalizeRole("admin")).toBe("ADMIN");
+    expect(normalizeRole(" Admin ")).toBe("ADMIN");
+    expect(normalizeRole("USER")).toBe("USER");
     expect(normalizeRole(undefined)).toBe("USER");
     expect(toSafeUser(ADMIN_ROW)).toEqual({
       id: "id-admin",

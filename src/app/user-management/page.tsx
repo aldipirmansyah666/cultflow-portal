@@ -83,10 +83,16 @@ export default function UserManagementPage() {
       ]);
       if (meRes.ok) {
         const meJson = (await meRes.json()) as { user: SessionUser };
-        setMe(meJson.user);
+        // Normalisasi case-insensitive: "admin"/" Admin " diperlakukan
+        // sebagai ADMIN. Sumber = /api/auth/me (JWT server), bukan mock.
+        const normalizedRole =
+          typeof meJson.user?.role === "string"
+            ? (meJson.user.role.trim().toUpperCase() as SessionUser["role"])
+            : "USER";
+        setMe({ ...meJson.user, role: normalizedRole });
         // Proteksi client-side: non-ADMIN langsung kembali ke dashboard.
         // (Proxy + API 403 tetap menjadi lapis pertahanan utama.)
-        if (meJson.user?.role !== "ADMIN") {
+        if (normalizedRole !== "ADMIN") {
           router.replace("/");
           return;
         }

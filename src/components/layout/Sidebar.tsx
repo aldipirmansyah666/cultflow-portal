@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   Code,
   Database,
+  Headset,
   Layers,
   LayoutDashboard,
   MessagesSquare,
@@ -14,12 +15,19 @@ import {
   PackageSearch,
   Scale,
   Search,
+  Truck,
   Users,
+  Wallet,
   X,
   type LucideIcon,
 } from "lucide-react";
 import { NAV_ITEMS, filterNavByRole, isNavActive, type NavItem } from "@/core/types/navigation";
 import { cn } from "@/lib/utils";
+
+// NOTE: Mock korporat ("cum:mock-role" / useCorporateRole) SENGAJA tidak
+// diimpor di sini. Sidebar hanya memakai `role` dari /api/auth/me
+// (JWT server via LayoutShell). Ini mencegah localStorage menutupi
+// hak ADMIN asli dan menyembunyikan menu User Management.
 
 /** Pemetaan nama ikon (string di `NavItem.icon`) ke komponen Lucide. */
 const NAV_ICONS: Record<string, LucideIcon> = {
@@ -32,6 +40,9 @@ const NAV_ICONS: Record<string, LucideIcon> = {
   Search,
   MessagesSquare,
   Users,
+  Wallet,
+  Headset,
+  Truck,
 };
 
 interface SidebarNavProps {

@@ -7,7 +7,7 @@ import {
 } from "./navigation";
 
 describe("NAV_ITEMS", () => {
-  it("memiliki 9 menu dengan href yang benar", () => {
+  it("memiliki 10 menu dengan href yang benar", () => {
     expect(NAV_ITEMS.map((i) => i.href)).toEqual([
       "/",
       "/data-utama",
@@ -16,6 +16,7 @@ describe("NAV_ITEMS", () => {
       "/bagging",
       "/bailout",
       "/reconcile",
+      "/fee-rekap",
       "/logs",
       "/user-management",
     ]);

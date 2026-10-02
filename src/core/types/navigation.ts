@@ -26,6 +26,7 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "Bagging Generator", href: "/bagging", icon: "Package" },
   { title: "Bailout Generator", href: "/bailout", icon: "PackageOpen" },
   { title: "Reconcile Validator", href: "/reconcile", icon: "Scale" },
+  { title: "Rekap Fee Loket", href: "/fee-rekap", icon: "Wallet" },
   { title: "WA Logs", href: "/logs", icon: "MessagesSquare" },
   {
     title: "User Management",
@@ -49,19 +50,27 @@ export function resolveNavItem(pathname: string): NavItem | undefined {
 }
 
 /**
- * Saring menu sidebar berdasarkan role sesi.
+ * Saring menu sidebar berdasarkan role sesi — case-insensitive.
  * Item tanpa `roles` selalu tampil; item ber-`roles` hanya tampil bila
- * role cocok. Role tak dikenal (tamu) tidak melihat menu terbatas —
- * mis. USER tak melihat "User Management".
+ * role cocok setelah di-UPPER-case + trim di kedua sisi.
+ * "ADMIN", "admin", " Admin " semuanya melihat "User Management".
  */
 export function filterNavByRole(
   items: NavItem[],
   role?: string | null
 ): NavItem[] {
-  return items.filter(
-    (item) =>
-      item.roles == null ||
-      item.roles.length === 0 ||
-      (role != null && item.roles.includes(role))
-  );
+  const normalizedRole =
+    typeof role === "string" ? role.trim().toUpperCase() : null;
+  return items.filter((item) => {
+    if (item.roles == null || item.roles.length === 0) return true;
+    if (normalizedRole == null) return false;
+    return item.roles.some(
+      (r) => typeof r === "string" && r.trim().toUpperCase() === normalizedRole
+    );
+  });
+}
+
+/** True bila role adalah ADMIN (helper presentasi, case-insensitive). */
+export function isAdminNavRole(role: unknown): boolean {
+  return typeof role === "string" && role.trim().toUpperCase() === "ADMIN";
 }

@@ -5,6 +5,14 @@
 
 export const MAX_EXCEL_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
 
+/**
+ * Batas khusus Rekap Fee Loket: 15 MB (rekap bulanan ±9 MB + headroom).
+ * Scope terbatas fee-rekap saja — fitur lain (bagging/bailout/data-utama)
+ * tetap 5 MB. Aman untuk server karena impor fee dikirim chunked
+ * 500 baris/request (lihat saveFeeImport), bukan 1 payload raksasa.
+ */
+export const MAX_FEE_EXCEL_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
+
 export function validateFileSize(
   file: File,
   maxBytes = MAX_EXCEL_SIZE_BYTES
@@ -19,7 +27,7 @@ export function validateFileSize(
 export function validateExcelMagicBytes(buffer: ArrayBuffer): boolean {
   const bytes = new Uint8Array(buffer.slice(0, 8));
 
-  // 1. XLSX (ZIP: PK..)
+  // 1. XLSX/XLSM/XLSB (kontainer ZIP/OPC: PK.. — .xlsb BIFF12 juga ZIP)
   const isXlsx = bytes[0] === 0x50 && bytes[1] === 0x4b;
   // 2. XLS biner (OLE2)
   const isXlsBinary = bytes[0] === 0xd0 && bytes[1] === 0xcf;
