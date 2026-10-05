@@ -80,6 +80,39 @@ body {
     box-shadow: none !important;
     border-radius: 0 !important;
   }
+  /* Isolasi cetak slip fee: modal Detail di-render di portal (di luar
+     <main>), jadi sembunyikan <main> + overlay saat modal slip terbuka
+     agar kertas hanya berisi slip, bukan halaman di belakangnya. */
+  body:has(.slip-print-modal) main {
+    display: none !important;
+  }
+  /* Konten modal kembali ke alur normal penuh (tanpa potong viewport). */
+  .slip-print-modal {
+    position: static !important;
+    transform: none !important;
+    width: 100% !important;
+    max-width: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+  /* Tabel rincian tercetak penuh: scroll layar dibuka saat cetak
+     (salin utuh tetap via tombol, dari data). */
+  .rincian-scroll {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+  /* Kepala tabel diulang tiap halaman; baris tak terbelah halaman. */
+  thead {
+    display: table-header-group;
+  }
+  tfoot {
+    display: table-footer-group;
+  }
+  tr {
+    break-inside: avoid;
+  }
 }
 
 /* ------------------------------------------------------------------ */

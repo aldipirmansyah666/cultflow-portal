@@ -49,6 +49,7 @@ import {
   buildFeeSlipText,
   buildFullModuleBreakdown,
   buildPeriode,
+  buildRincianText,
   deleteFeeRows,
   detectFeeHeader,
   displayNamaLoket,
@@ -161,6 +162,7 @@ function CariSlipGrid({
   // menyimpan modul beraktivitas, sisanya diisi nol di sini agar tabel
   // kanan selalu lengkap. Data legacy tidak punya rincian sama sekali.
   const [showZero, setShowZero] = useState(true);
+  const [copiedAll, setCopiedAll] = useState(false);
   const fullDetails = legacy ? [] : buildFullModuleBreakdown(details);
   const visibleDetails = showZero
     ? fullDetails
@@ -168,6 +170,16 @@ function CariSlipGrid({
   const activeCount = fullDetails.filter(
     (d) => d.lembar !== 0 || d.total !== 0
   ).length;
+
+  // Salin SELURUH rincian (79 modul + total, format TSV siap tempel ke
+  // spreadsheet) langsung dari data — tanpa seleksi manual, sehingga
+  // scroll layar tidak memotong apa pun.
+  async function copyAllDetails() {
+    const ok = await copyTextToClipboard(buildRincianText(fullDetails));
+    if (!ok) return;
+    setCopiedAll(true);
+    setTimeout(() => setCopiedAll(false), 2000);
+  }
   return (
     <div className="grid gap-0 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       {/* KIRI — Slip Keuangan & Profil Agen (C6:E27). */}
@@ -200,7 +212,7 @@ function CariSlipGrid({
             <p className="text-[11px] font-bold tracking-widest uppercase opacity-90">
               Fee Siap Transfer
             </p>
-            <p className="mt-0.5 truncate text-2xl font-extrabold tracking-tight">
+            <p className="mt-0.5 text-2xl font-extrabold tracking-tight break-words">
               {formatRupiah(profile.feeSiapTransfer)}
             </p>
           </div>
@@ -214,16 +226,33 @@ function CariSlipGrid({
             {legacy && " · (data legacy — tanpa rincian modul)"}
           </p>
           {!legacy && fullDetails.length > 0 && (
-            <button
-              type="button"
-              onClick={() => setShowZero((v) => !v)}
-              aria-pressed={showZero}
-              className="ml-auto rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
-            >
-              {showZero ? "Sembunyikan modul nol" : "Tampilkan semua modul"}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => void copyAllDetails()}
+                className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 print:hidden"
+              >
+                {copiedAll ? (
+                  <Check className="size-3.5 text-emerald-600" aria-hidden />
+                ) : (
+                  <Copy className="size-3.5" aria-hidden />
+                )}
+                {copiedAll ? "Tersalin!" : "Salin Semua Rincian"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowZero((v) => !v)}
+                aria-pressed={showZero}
+                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 print:hidden"
+              >
+                {showZero ? "Sembunyikan modul nol" : "Tampilkan semua modul"}
+              </button>
+            </>
           )}
         </div>
+        {/* Scroll vertikal rapi di layar (maks 480px, mengikuti modal
+            induk); salin utuh via tombol di atas (dari data, bukan DOM),
+            cetak penuh via CSS print (scroll dibuka). */}
         {legacy || visibleDetails.length === 0 ? (
           <p className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500">
             {legacy
@@ -231,7 +260,7 @@ function CariSlipGrid({
               : "Belum ada transaksi modul pada periode ini (seluruh modul nol)."}
           </p>
         ) : (
-          <div className="max-h-[480px] overflow-auto rounded-xl border border-slate-200 bg-white">
+          <div className="rincian-scroll max-h-[480px] overflow-auto rounded-xl border border-slate-200 bg-white">
             <table className="w-full min-w-[520px] text-left text-xs">
               <thead className="sticky top-0">
                 <tr className="bg-slate-900 text-[11px] tracking-wider text-slate-200 uppercase">
@@ -246,7 +275,7 @@ function CariSlipGrid({
                   const inactive = d.lembar === 0 && d.total === 0;
                   return (
                     <tr key={d.modul} className={inactive ? "bg-slate-50/50" : undefined}>
-                      <td className="px-3 py-1.5 font-semibold text-slate-800">{d.modul}</td>
+                      <td className="px-3 py-1.5 font-semibold break-words text-slate-800">{d.modul}</td>
                       <td className="px-3 py-1.5 text-right text-slate-600">
                         {inactive ? <span className="text-slate-300">0</span> : formatNumber(d.lembar)}
                       </td>
@@ -717,6 +746,10 @@ export default function FeeRekapPage() {
   /**
    * Salin slip modal sebagai GAMBAR ke clipboard (image/png).
    * Butuh ClipboardItem + izin clipboard (Chrome/Edge modern).
+   * Seluruh baris rincian (79 modul) dibentangkan dulu dari scroll
+   * 480px ke tinggi penuh agar hasil render mencakup semuanya dari
+   * atas sampai bawah — lalu dikembalikan di `finally` sehingga
+   * tampilan layar tidak berubah. Murni clipboard, tanpa file disk.
    */
   async function copySlipImage() {
     const node = modalSlipRef.current;
@@ -732,7 +765,27 @@ export default function FeeRekapPage() {
     }
     setImgBusy("copy");
     setImgError(null);
+    // Simpan gaya inline asal agar bisa dikembalikan persis.
+    const scrollers = Array.from(
+      node.querySelectorAll<HTMLElement>(".rincian-scroll")
+    );
+    const saved = scrollers.map((el) => ({
+      el,
+      maxHeight: el.style.maxHeight,
+      height: el.style.height,
+      overflow: el.style.overflow,
+    }));
     try {
+      // Bentangkan kontainer scroll internal (inline menimpa class
+      // Tailwind max-h-[480px]); tunggu satu frame agar layout final.
+      for (const el of scrollers) {
+        el.style.maxHeight = "none";
+        el.style.height = "auto";
+        el.style.overflow = "visible";
+      }
+      await new Promise<void>((resolve) => {
+        requestAnimationFrame(() => resolve());
+      });
       const { toBlob } = await import("html-to-image");
       const blob = await toBlob(node, {
         cacheBust: true,
@@ -751,6 +804,12 @@ export default function FeeRekapPage() {
           : "Gagal menyalin gambar. Gunakan Download PNG."
       );
     } finally {
+      // Kembalikan scroll internal apa adanya, lalu lepas status sibuk.
+      for (const s of saved) {
+        s.el.style.maxHeight = s.maxHeight;
+        s.el.style.height = s.height;
+        s.el.style.overflow = s.overflow;
+      }
       setImgBusy(null);
     }
   }
@@ -1137,7 +1196,7 @@ export default function FeeRekapPage() {
   return (
     <div className="space-y-5">
       {/* Banner */}
-      <section className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-blue-900 to-cyan-700 p-6 text-white shadow-lg shadow-blue-900/20 sm:p-8">
+      <section className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-blue-900 to-cyan-700 p-6 text-white shadow-lg shadow-blue-900/20 sm:p-8 print:hidden">
         <div className="relative flex flex-wrap items-center gap-4">
           <span className="flex size-12 items-center justify-center rounded-xl bg-white/10 ring-1 ring-white/20">
             <Wallet className="size-6 text-emerald-300" aria-hidden />
@@ -1185,7 +1244,7 @@ export default function FeeRekapPage() {
       {tab === "monitoring" ? (
         <>
           {/* Stat cards */}
-          <section className="grid gap-3 sm:grid-cols-3">
+          <section className="grid gap-3 sm:grid-cols-3 print:hidden">
             <StatCard
               title="Total Loket Terdaftar"
               value={listLoading ? "…" : String(summary.totalLoket)}
@@ -1210,7 +1269,7 @@ export default function FeeRekapPage() {
           </section>
 
           {/* Baris pencarian ala Cari: "Masukan PPID ... : [input]" */}
-          <section className="cf-card p-4 sm:p-5">
+          <section className="cf-card p-4 sm:p-5 print:hidden">
             <div className="grid grid-cols-1 items-center gap-2 sm:grid-cols-[220px_12px_1fr_auto]">
               <p className="text-sm font-medium text-slate-700">
                 Masukan PPID Lengkap / Kode PPID
@@ -1327,7 +1386,7 @@ export default function FeeRekapPage() {
           {agentProfile && (
             <section
               aria-label="Hasil pencarian agen"
-              className="overflow-hidden rounded-2xl border-2 border-slate-800 bg-white shadow-lg shadow-slate-900/10"
+              className="print-paper overflow-hidden rounded-2xl border-2 border-slate-800 bg-white shadow-lg shadow-slate-900/10"
             >
               <div className="flex flex-wrap items-center gap-3 border-b-2 border-slate-800 bg-slate-50 px-4 py-3 sm:px-6">
                 <p className="min-w-0 text-sm text-slate-700">
@@ -1336,7 +1395,7 @@ export default function FeeRekapPage() {
                     {committedQuery === "" ? "—" : committedQuery}
                   </span>
                 </p>
-                <span className="ml-auto flex gap-2">
+                <span className="ml-auto flex gap-2 print:hidden">
                   <button
                     type="button"
                     onClick={() =>
@@ -1459,7 +1518,7 @@ export default function FeeRekapPage() {
           )}
 
           {/* Tabel rekap */}
-          <section className="cf-card overflow-hidden">
+          <section className="cf-card overflow-hidden print:hidden">
             <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
               <h2 className="text-sm font-bold text-slate-900">Rekapitulasi Fee</h2>
               <p className="text-xs text-slate-500" aria-live="polite">
@@ -2227,10 +2286,10 @@ export default function FeeRekapPage() {
         }}
       >
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px]" />
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-[2px] print:hidden" />
           <Dialog.Content
             aria-describedby={undefined}
-            className="fixed top-1/2 left-1/2 z-50 max-h-[90vh] w-[calc(100%-2rem)] max-w-6xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl bg-white shadow-2xl focus:outline-none"
+            className="slip-print-modal fixed top-1/2 left-1/2 z-50 max-h-[90vh] w-[calc(100%-2rem)] max-w-6xl -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl bg-white shadow-2xl focus:outline-none"
           >
             {modalLoading ? (
               <p role="status" className="flex items-center justify-center gap-2 p-10 text-sm text-slate-500">
@@ -2251,7 +2310,7 @@ export default function FeeRekapPage() {
                         : `· ${formatPeriode(modalProfile.periode)}`}
                     </span>
                   </Dialog.Title>
-                  <span className="ml-auto flex flex-wrap gap-2">
+                  <span className="ml-auto flex flex-wrap gap-2 print:hidden">
                     <button
                       type="button"
                       onClick={() => void copyText(buildCariSlipText(modalProfile, modalDetails))}
@@ -2421,7 +2480,7 @@ export default function FeeRekapPage() {
       {toast && (
         <div
           role="status"
-          className="fixed right-4 bottom-4 z-[60] flex max-w-sm items-start gap-3 rounded-xl border border-emerald-200 bg-white p-4 shadow-2xl"
+          className="fixed right-4 bottom-4 z-[60] flex max-w-sm items-start gap-3 rounded-xl border border-emerald-200 bg-white p-4 shadow-2xl print:hidden"
         >
           <CheckCircle2 className="size-5 shrink-0 text-emerald-600" aria-hidden />
           <p className="text-sm font-bold text-slate-900">{toast}</p>

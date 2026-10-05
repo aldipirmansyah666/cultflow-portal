@@ -5,6 +5,7 @@ import {
   buildFeeCsv,
   buildFullModuleBreakdown,
   buildModuleBreakdown,
+  buildRincianText,
   CARI_MODULE_MAP,
   classifyFeeDbError,
   deleteFeeRows,
@@ -1279,6 +1280,18 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
     ]);
     expect(withExtra).toHaveLength(CARI_MODULE_MAP.length + 1);
     expect(withExtra[withExtra.length - 1]?.modul).toBe("MODUL LAMA");
+  });
+
+  it("buildRincianText: TSV header + baris + TOTAL", () => {
+    const text = buildRincianText([
+      { modul: "PLN Postpaid", lembar: 56, feePerLembar: 2050, total: 114800 },
+      { modul: "JASTEL", lembar: 0, feePerLembar: 0, total: 0 },
+    ]);
+    const lines = text.split("\n");
+    expect(lines[0]).toBe("MODUL\tLEMBAR\tFEE / LEMBAR\tTOTAL FEE");
+    expect(lines).toContain("PLN Postpaid\t56\t2050\t114800");
+    expect(lines).toContain("JASTEL\t0\t0\t0");
+    expect(lines[lines.length - 1]).toBe("TOTAL\t56\t\t114800");
   });
 
   it("parseLoketBsbFull: identitas + keuangan + rincian + status", () => {

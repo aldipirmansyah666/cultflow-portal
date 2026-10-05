@@ -2597,6 +2597,24 @@ export function buildFullModuleBreakdown(
   return out;
 }
 
+/**
+ * Teks TSV rincian modul untuk "Salin Semua Rincian": header + seluruh
+ * baris (termasuk nol) + baris TOTAL. Angka mentah (tanpa format Rp agar
+ * tertempel rapi ke spreadsheet) dan tab sebagai pemisah kolom.
+ */
+export function buildRincianText(details: TransactionBreakdown[]): string {
+  const lines = [
+    "MODUL\tLEMBAR\tFEE / LEMBAR\tTOTAL FEE",
+    ...details.map(
+      (d) => `${d.modul}\t${d.lembar}\t${d.feePerLembar}\t${d.total}`
+    ),
+  ];
+  const totalLembar = details.reduce((s, d) => s + d.lembar, 0);
+  const totalFee = details.reduce((s, d) => s + d.total, 0);
+  lines.push(`TOTAL\t${totalLembar}\t\t${totalFee}`);
+  return lines.join("\n");
+}
+
 export interface LoketBsbFullParse {
   /** Profil lengkap per loket (untuk loket_profiles + details). */
   profiles: LoketProfileFull[];
