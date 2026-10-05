@@ -27,7 +27,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx";
+import {
+  loadWorkbookFromBuffer,
+  validateMatrixLimits,
+} from "@/lib/excel";
 import {
   buildEffectiveFields,
   dedupeByPpid,
@@ -265,9 +268,12 @@ export interface SheetMatrix {
 /**
  * Baca file Excel + pilih sheet "Agen CUM" (EKSak, tanpa fallback).
  * Dipakai main() dan skrip backfill agar parsing file tunggal sumbernya.
- * @throws Error bila file tak ditemukan / sheet absen.
+ * @throws Error bila file tak ditemukan / sheet absen / format tak didukung.
  */
-export function readSheetMatrix(file: string, sheet: string): SheetMatrix {
+export async function readSheetMatrix(
+  file: string,
+  sheet: string
+): Promise<SheetMatrix> {
   const filePath = path.resolve(process.cwd(), file);
   if (!fs.existsSync(filePath)) {
     const siblings = fs
@@ -280,15 +286,20 @@ export function readSheetMatrix(file: string, sheet: string): SheetMatrix {
           : "")
     );
   }
-  const workbook = XLSX.readFile(filePath);
-  const sheetName = workbook.SheetNames.includes(sheet) ? sheet : undefined;
+  // Parser exceljs (pengganti SheetJS): hanya .xlsx/.xlsm; .xls/.xlsb
+  // ditolak dengan pesan migrasi yang jelas oleh loadWorkbookFromBuffer.
+  const raw = fs.readFileSync(filePath);
+  const { sheetNames, matrices } = await loadWorkbookFromBuffer(raw, {
+    defval: null,
+  });
+  const sheetName = sheetNames.includes(sheet) ? sheet : undefined;
   if (!sheetName) {
     throw new Error(`Sheet '${sheet}' tidak ditemukan dalam file Excel.`);
   }
-  const matrix = XLSX.utils.sheet_to_json<unknown[]>(
-    workbook.Sheets[sheetName] as never,
-    { header: 1, defval: null, raw: true }
-  ) as unknown[][];
+  const matrix = matrices.get(sheetName) ?? [];
+  // Batas parser: 20000 baris data + toleransi header, 200 kolom,
+  // panjang string per sel (batas sel Excel).
+  validateMatrixLimits(matrix, { maxRows: 20000 + 30, maxCols: 200 });
   return { sheetName, matrix };
 }
 
@@ -302,7 +313,7 @@ async function main(): Promise<void> {
   let sheetName: string;
   let matrix: unknown[][];
   try {
-    ({ sheetName, matrix } = readSheetMatrix(opts.file, opts.sheet));
+    ({ sheetName, matrix } = await readSheetMatrix(opts.file, opts.sheet));
   } catch (err) {
     console.error(err instanceof Error ? err.message : err);
     process.exitCode = 1;

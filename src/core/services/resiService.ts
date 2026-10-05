@@ -120,10 +120,14 @@ export function classifyResiDbError(
 }
 
 /**
- * Catatan berisi deliv/delivered/retur otomatis menutup resi (CLOSE =
- * SUDAH_FOLLOWUP + flag is_selesai + stempel closed_at).
+ * Catatan berisi kata-kunci serah-terima (delivered/diterima/retur)
+ * otomatis menutup resi (CLOSE = SUDAH_FOLLOWUP + flag is_selesai +
+ * stempel closed_at). Pola disengaja spesifik (kata utuh + batas
+ * kata) agar sangkalan seperti "belum deliv" TIDAK ikut menutup resi:
+ * "deliv" saja bukan kata kunci ("delivered" utuh yang dimaksud).
  */
-export const AUTO_CLOSE_NOTE_REGEX = /deliv|delivered|retur/i;
+export const AUTO_CLOSE_NOTE_REGEX =
+  /(?:^|[\s.,;:])(delivered|diterima(\s+paket)?|paket\s+(sudah\s+)?diterima|retur(\s+disetujui)?)(?=[\s.,;:!]|$)/i;
 
 export function isAutoCloseNote(catatan: string | null | undefined): boolean {
   if (catatan === null || catatan === undefined || catatan.trim() === "") {
@@ -504,7 +508,8 @@ export async function updateFollowUpStatus(
   if (executor === "") throw new Error("Nama user tidak boleh kosong");
   const note = input.catatan.trim();
   const nowIso = new Date().toISOString();
-  // Otomatisasi CLOSE: catatan berisi deliv/delivered/retur menutup resi.
+  // Otomatisasi CLOSE: catatan berisi kata-kunci serah-terima
+  // (delivered/diterima/retur, kata utuh) menutup resi.
   const autoClose = isAutoCloseNote(note);
   // Riwayat: entri baru digabung di atas catatan lama (tidak menimpa).
   const existing = await readCatatanFollowup(client, id);
@@ -587,7 +592,8 @@ export async function updateResiStatus(
   const executor = input.userName.trim();
   if (executor === "") throw new Error("Nama user tidak boleh kosong");
   const nowIso = new Date().toISOString();
-  // Otomatisasi CLOSE: catatan berisi deliv/delivered/retur menutup resi
+  // Otomatisasi CLOSE: catatan berisi kata-kunci serah-terima
+  // (delivered/diterima/retur, kata utuh) menutup resi
   // apa pun pilihan statusnya.
   const autoClose = isAutoCloseNote(note);
   const finalStatus = autoClose ? FOLLOWUP_DONE : status_followup;

@@ -3,8 +3,8 @@
  * filter realtime, pagination, dan export CSV/Excel.
  *
  * Murni (tanpa dependensi Next/Supabase) agar mudah diuji dan dipakai di
- * Client Component. SheetJS (`xlsx`) diimpor dinamis di page agar tidak
- * membebani initial bundle.
+ * Client Component. Parser Excel (`@/lib/excel`, exceljs) diimpor dinamis
+ * di page agar tidak membebani initial bundle.
  */
 
 export type FeeStatus = "TERBAYAR" | "PENDING";

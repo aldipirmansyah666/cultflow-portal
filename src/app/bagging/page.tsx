@@ -22,8 +22,6 @@ import {
   parseBaggingRowsFromAOA,
   type BaggingRow,
 } from "@/core/parsers/baggingParser";
-import { lookupAgenByPpid } from "@/core/services/dataUtamaService";
-import { getSupabaseBrowser } from "@/lib/supabase/client";
 import { normalizePeriodeToISO } from "@/core/parsers/bailoutParser";
 import {
   MAX_EXCEL_SIZE_BYTES,
@@ -83,7 +81,8 @@ export default function BaggingPage() {
     setIsProcessingExcel(true);
     setUploadError(null);
     try {
-      const XLSX = await import("xlsx");
+      const { loadWorkbookFromBuffer, matrixToObjects, validateMatrixLimits } =
+        await import("@/lib/excel");
       const allParsedRows: BaggingRow[] = [];
       for (const file of Array.from(files)) {
         const sizeErr = validateFileSize(file, MAX_EXCEL_SIZE_BYTES);
@@ -99,23 +98,18 @@ export default function BaggingPage() {
             );
             continue;
           }
-          const workbook = XLSX.read(buffer, { type: "array" });
-          const sheetName = workbook.SheetNames[0];
+          const workbook = await loadWorkbookFromBuffer(buffer, { defval: "" });
+          const sheetName = workbook.sheetNames[0];
           if (!sheetName) continue;
-          const sheet = workbook.Sheets[sheetName];
-          if (!sheet) continue;
-          const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-            header: 1,
-            defval: "",
-          }) as unknown[][];
+          const aoa = workbook.matrices.get(sheetName) ?? [];
+          validateMatrixLimits(aoa, { maxRows: 20030, maxCols: 200 });
           const parsed = parseBaggingRowsFromAOA(aoa);
-          // Fallback ke sheet_to_json bila AOA tak menemukan header dinamis
+          // Fallback ke objek-baris (header baris pertama) bila AOA tak
+          // menemukan header dinamis
           if (parsed.length > 0) {
             allParsedRows.push(...parsed);
           } else {
-            const jsonData = XLSX.utils.sheet_to_json<BaggingRow>(sheet, {
-              defval: "",
-            });
+            const jsonData = matrixToObjects<BaggingRow>(aoa);
             allParsedRows.push(...jsonData);
           }
         } catch (err) {
@@ -169,20 +163,30 @@ export default function BaggingPage() {
   const agenKeys = useMemo(() => Object.keys(groupedByAgen), [groupedByAgen]);
 
   // No HP pemilik per agen (untuk wa.me/{noHp}): lookup nama agen ke
-  // data_lengkap_utama, dinormalisasi ke format 62xx. "" = tak ditemukan
-  // (tombol WA pakai tautan umum https://wa.me/?text=…).
+  // data_lengkap_utama via API ber-sesi (service_role) — query browser
+  // langsung (anon key) ditolak RLS (20261006000000_pii_rls_lockdown.sql).
+  // Dinormalisasi ke format 62xx. "" = tak ditemukan (tombol WA pakai
+  // tautan umum https://wa.me/?text=…).
   const [agenPhones, setAgenPhones] = useState<Record<string, string>>({});
   useEffect(() => {
     if (agenKeys.length === 0) return;
     let cancelled = false;
     (async () => {
       try {
-        const client = getSupabaseBrowser();
         const entries = await Promise.all(
           agenKeys.map(async (name) => {
             try {
-              const row = await lookupAgenByPpid(client, name);
-              return [name, normalizeWaNumber(row?.no_hp_pemilik)] as const;
+              const res = await fetch(
+                `/api/data-utama/lookup?q=${encodeURIComponent(name)}`
+              );
+              if (!res.ok) return [name, ""] as const;
+              const body = (await res.json()) as {
+                profile?: { noHandphone?: string };
+              };
+              return [
+                name,
+                normalizeWaNumber(body.profile?.noHandphone ?? ""),
+              ] as const;
             } catch {
               return [name, ""] as const;
             }

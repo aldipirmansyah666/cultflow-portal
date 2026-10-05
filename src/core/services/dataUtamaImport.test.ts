@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx";
+import { writeAoaToBuffer } from "@/lib/excel";
 import {
   importAgenMatrix,
   importExcelData,
@@ -122,14 +122,13 @@ describe("importExcelData", () => {
     vi.unstubAllGlobals();
   });
 
-  function xlsxFile(name: string): File {
-    const ws = XLSX.utils.aoa_to_sheet([
-      ["PPID", "NAMA PEMILIK"],
-      ["PP9", "Pemilik Sembilan"],
-    ]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Agen CUM");
-    const raw = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as unknown as Uint8Array;
+  async function xlsxFile(name: string): Promise<File> {
+    const raw = await writeAoaToBuffer({
+      "Agen CUM": [
+        ["PPID", "NAMA PEMILIK"],
+        ["PP9", "Pemilik Sembilan"],
+      ],
+    });
     const bytes = Uint8Array.from(raw);
     const file = new File([bytes], name, {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -164,7 +163,7 @@ describe("importExcelData", () => {
         };
       })
     );
-    const summary = await importExcelData(xlsxFile("agen.xlsx"), (p) =>
+    const summary = await importExcelData(await xlsxFile("agen.xlsx"), (p) =>
       stages.push(p.stage)
     );
     expect(summary.upserted).toBe(1);
@@ -175,10 +174,7 @@ describe("importExcelData", () => {
   });
 
   it("error persis bila sheet Agen CUM absen", async () => {
-    const ws = XLSX.utils.aoa_to_sheet([["PPID"], ["X1"]]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Sheet Lain");
-    const raw = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as unknown as Uint8Array;
+    const raw = await writeAoaToBuffer({ "Sheet Lain": [["PPID"], ["X1"]] });
     const bytes = Uint8Array.from(raw);
     const file = new File([bytes], "lain.xlsx", {
       type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -205,7 +201,7 @@ describe("importExcelData", () => {
         json: async () => ({ error: "Bukan ADMIN" }),
       }))
     );
-    await expect(importExcelData(xlsxFile("a.xlsx"))).rejects.toThrow(
+    await expect(importExcelData(await xlsxFile("a.xlsx"))).rejects.toThrow(
       "Bukan ADMIN"
     );
   });

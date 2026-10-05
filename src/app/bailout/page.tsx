@@ -80,7 +80,8 @@ export default function BailoutPage() {
     setIsProcessing(true);
     setUploadError(null);
     try {
-      const XLSX = await import("xlsx");
+      const { loadWorkbookFromBuffer, validateMatrixLimits } =
+        await import("@/lib/excel");
       const buffer = await file.arrayBuffer();
       if (!validateExcelMagicBytes(buffer)) {
         setUploadError(
@@ -88,18 +89,17 @@ export default function BailoutPage() {
         );
         return;
       }
-      const workbook = XLSX.read(buffer, { type: "array" });
-      if (workbook.SheetNames.length === 0) throw new Error("No sheet found");
+      const workbook = await loadWorkbookFromBuffer(buffer, { defval: "" });
+      if (workbook.sheetNames.length === 0) throw new Error("No sheet found");
       // Hanya baca sheet "CA" (case-insensitive); fallback ke sheet pertama
       const targetSheetName =
-        workbook.SheetNames.find((name) => name.trim().toLowerCase() === "ca") ??
-        workbook.SheetNames[0];
-      const sheet = targetSheetName ? workbook.Sheets[targetSheetName] : undefined;
-      if (!sheet) throw new Error("No sheet found");
-      const aoa = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-        header: 1,
-        defval: "",
-      }) as unknown[][];
+        workbook.sheetNames.find((name) => name.trim().toLowerCase() === "ca") ??
+        workbook.sheetNames[0];
+      const aoa = targetSheetName
+        ? (workbook.matrices.get(targetSheetName) ?? [])
+        : [];
+      if (!targetSheetName || aoa.length === 0) throw new Error("No sheet found");
+      validateMatrixLimits(aoa, { maxRows: 20030, maxCols: 200 });
       const parsed = parseBailoutRowsFromAOA(aoa);
       setData(parsed);
       if (parsed.length === 0) {

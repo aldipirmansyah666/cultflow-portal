@@ -12,12 +12,8 @@ import {
   SearchX,
   X,
 } from "lucide-react";
-import { getSupabaseBrowser } from "@/lib/supabase/client";
 import {
   buildLookupWaText,
-  lookupAgenByPpid,
-  suggestAgen,
-  toAgenProfile,
   type AgenProfile,
   type AgenSuggestItem,
 } from "@/core/services/dataUtamaService";
@@ -113,24 +109,38 @@ function LookupAgenView() {
   // Auto-suggest real-time (debounce) via PPID / nama loket.
   // Reset sinkron ditangani di handleQueryChange; efek ini hanya
   // menjadwalkan fetch async (setState di dalam callback = aman).
+  // Via API ber-sesi (service_role): query browser langsung (anon key)
+  // ditolak RLS (20261006000000_pii_rls_lockdown.sql).
   useEffect(() => {
     if (query.trim().length < SUGGEST_MIN_CHARS) return;
+    let cancelled = false;
     const timer = setTimeout(() => {
       (async () => {
         try {
-          const client = getSupabaseBrowser();
-          const items = await suggestAgen(client, query);
-          setSuggests(items);
+          const res = await fetch(
+            `/api/data-utama/suggest?q=${encodeURIComponent(query)}`
+          );
+          const body = (await res.json()) as {
+            items?: AgenSuggestItem[];
+            error?: string;
+          };
+          if (cancelled) return;
+          if (!res.ok) throw new Error(body.error || "Saran gagal dimuat.");
+          setSuggests(body.items ?? []);
           setSuggestOpen(true);
         } catch {
+          if (cancelled) return;
           setSuggests([]);
           setSuggestOpen(false);
         } finally {
-          setSuggestLoading(false);
+          if (!cancelled) setSuggestLoading(false);
         }
       })();
     }, SUGGEST_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [query]);
 
   function handleQueryChange(value: string) {
@@ -158,13 +168,24 @@ function LookupAgenView() {
     setStatus({ kind: "loading" });
     setCopied(false);
     try {
-      const client = getSupabaseBrowser();
-      const row = await lookupAgenByPpid(client, key);
-      if (!row) {
+      // Via API ber-sesi (service_role): query browser langsung (anon key)
+      // ditolak RLS (20261006000000_pii_rls_lockdown.sql).
+      const res = await fetch(
+        `/api/data-utama/lookup?q=${encodeURIComponent(key)}`
+      );
+      const body = (await res.json()) as {
+        found?: boolean;
+        profile?: AgenProfile;
+        error?: string;
+      };
+      if (res.status === 404 || body.found === false) {
         setStatus({ kind: "not-found", keyword: key });
         return;
       }
-      setStatus({ kind: "found", profile: toAgenProfile(row) });
+      if (!res.ok || !body.profile) {
+        throw new Error(body.error || "Lookup gagal. Coba lagi.");
+      }
+      setStatus({ kind: "found", profile: body.profile });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Lookup gagal. Coba lagi.";
       setStatus({ kind: "error", message });
@@ -332,12 +353,9 @@ function LookupAgenView() {
         <div role="alert" className="rounded-xl border border-red-200 bg-red-50 p-5 text-center">
           <p className="text-sm font-bold text-red-700">Lookup gagal</p>
           <p className="mx-auto mt-1 max-w-md text-sm text-red-600">{status.message}</p>
-          {status.message.includes("NEXT_PUBLIC_SUPABASE") && (
-            <p className="mx-auto mt-2 max-w-md text-xs text-red-500">
-              Isi NEXT_PUBLIC_SUPABASE_URL dan NEXT_PUBLIC_SUPABASE_ANON_KEY di
-              .env.local lalu jalankan ulang dev server.
-            </p>
-          )}
+          <p className="mx-auto mt-2 max-w-md text-xs text-red-500">
+            Periksa koneksi dan pastikan Anda masih login, lalu coba lagi.
+          </p>
         </div>
       )}
 

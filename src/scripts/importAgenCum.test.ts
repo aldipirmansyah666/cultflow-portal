@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx";
+import { writeAoaToFile } from "@/lib/excel";
 import { readSheetMatrix } from "./importAgenCum";
 import {
   buildEffectiveFields,
@@ -429,26 +429,22 @@ describe("dedupeByPpid", () => {
 });
 
 describe("readSheetMatrix (sheet Agen CUM eksak)", () => {
-  function tmpWorkbook(sheets: Record<string, unknown[][]>): string {
-    const wb = XLSX.utils.book_new();
-    for (const [name, aoa] of Object.entries(sheets)) {
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), name);
-    }
+  async function tmpWorkbook(sheets: Record<string, unknown[][]>): Promise<string> {
     const full = path.join(
       fs.mkdtempSync(path.join(os.tmpdir(), "agencum-")),
       "tes.xlsx"
     );
-    XLSX.writeFile(wb, full);
+    await writeAoaToFile(full, sheets);
     return full;
   }
 
-  it("membaca sheet Agen CUM persis", () => {
-    const full = tmpWorkbook({
+  it("membaca sheet Agen CUM persis", async () => {
+    const full = await tmpWorkbook({
       "Sheet1": [["abaikan"]],
       "Agen CUM": [["PPID"], ["X1"]],
     });
     try {
-      const { sheetName, matrix } = readSheetMatrix(full, "Agen CUM");
+      const { sheetName, matrix } = await readSheetMatrix(full, "Agen CUM");
       expect(sheetName).toBe("Agen CUM");
       expect(matrix[0]).toEqual(["PPID"]);
     } finally {
@@ -456,10 +452,10 @@ describe("readSheetMatrix (sheet Agen CUM eksak)", () => {
     }
   });
 
-  it("error persis bila sheet absen (tanpa fallback fuzzy)", () => {
-    const full = tmpWorkbook({ "agen cum": [["PPID"]] });
+  it("error persis bila sheet absen (tanpa fallback fuzzy)", async () => {
+    const full = await tmpWorkbook({ "agen cum": [["PPID"]] });
     try {
-      expect(() => readSheetMatrix(full, "Agen CUM")).toThrow(
+      await expect(readSheetMatrix(full, "Agen CUM")).rejects.toThrow(
         "Sheet 'Agen CUM' tidak ditemukan dalam file Excel."
       );
     } finally {

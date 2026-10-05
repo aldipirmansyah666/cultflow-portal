@@ -300,13 +300,22 @@ describe("deleteResi / deleteResiBatch", () => {
 });
 
 describe("isAutoCloseNote", () => {
-  it("deteksi deliv/delivered/retur case-insensitive", () => {
-    expect(isAutoCloseNote("paket deliv ke agen")).toBe(true);
+  it("deteksi delivered/diterima/retur utuh case-insensitive", () => {
     expect(isAutoCloseNote("Paket DELIVERED ke pembeli")).toBe(true);
+    expect(isAutoCloseNote("Paket sudah diterima")).toBe(true);
+    expect(isAutoCloseNote("diterima paket")).toBe(true);
     expect(isAutoCloseNote("retur barang rusak")).toBe(true);
+    expect(isAutoCloseNote("retur disetujui")).toBe(true);
     expect(isAutoCloseNote("Hubungi agen")).toBe(false);
     expect(isAutoCloseNote("")).toBe(false);
     expect(isAutoCloseNote(null)).toBe(false);
+  });
+
+  it("TIDAK menutup untuk singkatan/sangkalan", () => {
+    expect(isAutoCloseNote("paket deliv ke agen")).toBe(false);
+    expect(isAutoCloseNote("belum deliv")).toBe(false);
+    expect(isAutoCloseNote("return to sender")).toBe(false);
+    expect(isAutoCloseNote("delivery tertunda")).toBe(false);
   });
 });
 
@@ -342,7 +351,7 @@ describe("otomatisasi CLOSE dari catatan follow-up", () => {
   }
 
   it.each([
-    ["deliv ke agen", "BELUM_FOLLOWUP"],
+    ["Paket sudah diterima", "BELUM_FOLLOWUP"],
     ["Paket DELIVERED ke pembeli", "PROSES_FOLLOWUP"],
     ["retur barang rusak", "BELUM_FOLLOWUP"],
   ])("updateResiStatus: catatan %p memaksa CLOSE", async (note, status) => {
@@ -372,6 +381,20 @@ describe("otomatisasi CLOSE dari catatan follow-up", () => {
     expect(payload.status_followup).toBe("SUDAH_FOLLOWUP");
     expect(payload.is_selesai).toBe("SELESAI");
     expect(typeof payload.closed_at).toBe("string");
+  });
+
+  it("updateFollowUpStatus: sangkalan 'belum deliv' TIDAK memaksa CLOSE", async () => {
+    const captured: Record<string, unknown> = {};
+    await updateFollowUpStatus(fakeStatusClient(captured), {
+      id: 3,
+      status: "BELUM_FOLLOWUP",
+      catatan: "belum deliv, jangan tutup",
+      userName: "Aldi",
+    });
+    const payload = captured.payload as Record<string, unknown>;
+    expect(payload.status_followup).toBe("BELUM_FOLLOWUP");
+    expect(payload.is_selesai).toBeUndefined();
+    expect(payload).not.toHaveProperty("closed_at");
   });
 
   it("catatan biasa -> status normal tanpa closed_at", async () => {

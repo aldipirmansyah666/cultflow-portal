@@ -731,7 +731,7 @@ export default function FeeRekapPage() {
   }
 
   async function downloadExcel() {
-    const XLSX = await import("xlsx");
+    const { downloadAoaAsXlsx } = await import("@/lib/excel");
     const aoa: (string | number)[][] = [
       ["No", "PPID", "Nama Loket", "Periode", "Total Fee (Rp)", "Status"],
       ...filtered.map((r, i) => [
@@ -743,11 +743,12 @@ export default function FeeRekapPage() {
         r.status,
       ] as (string | number)[]),
     ];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    ws["!cols"] = [{ wch: 5 }, { wch: 18 }, { wch: 28 }, { wch: 18 }, { wch: 18 }, { wch: 12 }];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Rekap Fee");
-    XLSX.writeFile(wb, `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.xlsx`);
+    await downloadAoaAsXlsx(
+      `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.xlsx`,
+      "Rekap Fee",
+      aoa,
+      [5, 18, 28, 18, 18, 12]
+    );
     setToast(`${filtered.length} baris diekspor ke Excel.`);
   }
 
@@ -762,7 +763,12 @@ export default function FeeRekapPage() {
     setParseError(null);
     setSaveResult(null);
     try {
-      const XLSX = await import("xlsx");
+      const {
+        getMergeRanges,
+        hasFormulaAt,
+        loadWorkbookFromBuffer,
+        validateMatrixLimits,
+      } = await import("@/lib/excel");
       const buffer = await file.arrayBuffer();
       if (!validateExcelMagicBytes(buffer)) {
         setParseError(
@@ -770,12 +776,10 @@ export default function FeeRekapPage() {
         );
         return;
       }
-      // type:"array" menangani .xlsx (ZIP), .xls (OLE2), maupun .xlsb
-      // (ZIP/BIFF12) — SheetJS mendeteksi format dari magic bytes buffer,
-      // tanpa opsi khusus tambahan. Opsi `type: "buffer"` hanya untuk
-      // Node.js Buffer; di browser ArrayBuffer + "array" sudah tepat.
-      const wb = XLSX.read(buffer, { type: "array" });
-      if (wb.SheetNames.length === 0) throw new Error("Berkas tidak berisi sheet.");
+      // exceljs membaca .xlsx/.xlsm (OOXML ZIP); .xls (OLE2)/.xlsb (BIFF12)
+      // ditolak dengan pesan migrasi yang jelas oleh loadWorkbookFromBuffer.
+      const wb = await loadWorkbookFromBuffer(buffer, { defval: "" });
+      if (wb.sheetNames.length === 0) throw new Error("Berkas tidak berisi sheet.");
       // Sheet target: "Loket BSB" bila ada (layout diketahui: header
       // indeks 2, data indeks 5, PPID idx 1, Nama idx 2, fee idx
       // 189/191/196). Jika tidak ada, pindai semua sheet (maks 10) dan
@@ -783,16 +787,16 @@ export default function FeeRekapPage() {
       // target agar tidak salah petakan sheet lain.
       // Sel merge (PPID digabung ke bawah — khas .xlsb) diteruskan ke
       // bawah agar barisnya tidak terbuang sebagai "kosong".
-      const selection = selectFeeSheet(wb.SheetNames);
+      const selection = selectFeeSheet(wb.sheetNames);
       const scanned: { name: string; matrix: unknown[][] }[] = [];
-      for (const name of wb.SheetNames.slice(0, 10)) {
-        const sheet = wb.Sheets[name];
-        if (!sheet) continue;
-        const raw = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-          header: 1,
-          defval: "",
-        }) as unknown[][];
-        scanned.push({ name, matrix: fillMergedCells(raw, sheet["!merges"]) });
+      for (const name of wb.sheetNames.slice(0, 10)) {
+        const raw = wb.matrices.get(name) ?? [];
+        const ws = wb.worksheets.get(name);
+        validateMatrixLimits(raw, { maxRows: 20030, maxCols: 250 });
+        scanned.push({
+          name,
+          matrix: ws ? fillMergedCells(raw, getMergeRanges(ws)) : raw,
+        });
       }
       let hit: { name: string; matrix: unknown[][] } | undefined;
       let hitTarget: FeeSheetTarget | undefined;
@@ -808,24 +812,20 @@ export default function FeeRekapPage() {
       }
       hit ??= scanned.find((s) => detectFeeHeader(s.matrix) !== null);
       if (!hit) {
-        const names = wb.SheetNames.slice(0, 10).join(", ");
+        const names = wb.sheetNames.slice(0, 10).join(", ");
         throw new Error(
           `Tidak ada baris fee terdeteksi di sheet mana pun (${names}). ` +
             "Pastikan salah satu sheet memuat header PPID + Nama Loket/Agen + Fee/Total."
         );
       }
-      // Inspektor sel mentah untuk audit formula: sel fee berformula
-      // (.f ada) tanpa nilai cache (.v kosong) adalah akar Rp-0 massal
-      // yang khas pada .xlsb — terlihat berangka di Excel, terbaca ""
-      // oleh parser. Indeks matriks = alamat sheet (header:1 dari baris 1).
-      const hitSheet = wb.Sheets[hit.name];
-      const hitCells =
-        hitSheet as unknown as Record<string, { f?: unknown } | undefined>;
+      // Inspektor sel mentah untuk audit formula: sel berformula tanpa
+      // nilai cache adalah akar Rp-0 massal yang khas pada .xlsb —
+      // terlihat berangka di Excel, terbaca "" oleh parser. Indeks
+      // matriks = alamat sheet (baris 1 -> indeks 0).
+      const hitWs = wb.worksheets.get(hit.name);
       const inspectCell = (r: number, c: number) => {
-        const cell = hitCells[XLSX.utils.encode_cell({ r, c })];
-        return cell && typeof cell.f === "string"
-          ? { hasFormula: true }
-          : undefined;
+        if (!hitWs) return undefined;
+        return hasFormulaAt(hitWs, r, c) ? { hasFormula: true } : undefined;
       };
       const fileLabel = file.name.replace(/\.[^.]+$/, "");
       // Jalur MASTER untuk sheet Loket BSB: parser absolut penuh

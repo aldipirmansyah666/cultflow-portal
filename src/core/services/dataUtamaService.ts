@@ -1,5 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import * as XLSX from "xlsx";
+import {
+  loadWorkbookFromBuffer,
+  validateMatrixLimits,
+} from "@/lib/excel";
 import {
   validateExcelMagicBytes,
   validateFileSize,
@@ -832,17 +835,19 @@ export async function importExcelData(
   if (!validateExcelMagicBytes(buffer)) {
     throw new Error("Format file tidak valid. Harap unggah Excel/CSV yang sah.");
   }
-  const workbook = XLSX.read(buffer, { type: "array" });
+  // Parser exceljs (pengganti SheetJS): buffer -> matriks AOA per sheet.
+  const { matrices } = await loadWorkbookFromBuffer(buffer, { defval: null });
   // WAJIB sheet "Agen CUM" (eksak) — jangan sheet pertama sembarang.
-  const sheet = workbook.Sheets["Agen CUM"];
-  if (!sheet) {
+  const matrix = matrices.get("Agen CUM");
+  if (!matrix) {
     throw new Error("Sheet 'Agen CUM' tidak ditemukan dalam file Excel.");
   }
-  const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
-    header: 1,
-    defval: null,
-    raw: true,
-  }) as unknown[][];
+  // Batas parser: baris (IMPORT_MAX_ROWS), kolom (IMPORT_MAX_COLS),
+  // panjang string per sel (batas sel Excel) — melengkapi cek API route.
+  validateMatrixLimits(matrix, {
+    maxRows: IMPORT_MAX_ROWS + 30,
+    maxCols: IMPORT_MAX_COLS,
+  });
 
   const dataRows = Math.max(0, matrix.length - 1);
   onProgress?.({

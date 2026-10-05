@@ -19,14 +19,12 @@ import {
   User,
   X,
 } from "lucide-react";
-import { getSupabaseBrowser } from "@/lib/supabase/client";
 import {
   DATA_UTAMA_FIELD_COUNT,
   DATA_UTAMA_FIELD_GROUPS,
-  getDataUtamaList,
-  getRegionalOptions,
   importExcelData,
   type AgenImportSummary,
+  type DataUtamaListResult,
   type DataUtamaRow,
 } from "@/core/services/dataUtamaService";
 import { cn } from "@/lib/utils";
@@ -119,16 +117,24 @@ export default function DataUtamaPage() {
     setLoading(true);
     setError(null);
     try {
-      const client = getSupabaseBrowser();
-      const result = await getDataUtamaList(client, {
-        search: debouncedSearch,
+      // Via API ber-sesi (service_role): query browser langsung (anon key)
+      // ditolak RLS (20261006000000_pii_rls_lockdown.sql).
+      const params = new URLSearchParams({
+        q: debouncedSearch,
         regional,
-        page,
-        pageSize: PAGE_SIZE,
+        page: String(page),
+        pageSize: String(PAGE_SIZE),
       });
-      setRows(result.data);
-      setTotal(result.total);
-      setTotalPages(result.totalPages);
+      const res = await fetch(`/api/data-utama?${params.toString()}`);
+      const body = (await res.json()) as Partial<DataUtamaListResult> & {
+        error?: string;
+      };
+      if (!res.ok) {
+        throw new Error(body.error || "Gagal memuat data. Coba lagi.");
+      }
+      setRows(body.data ?? []);
+      setTotal(body.total ?? 0);
+      setTotalPages(body.totalPages ?? 1);
     } catch (err) {
       setError(
         err instanceof Error
@@ -153,8 +159,19 @@ export default function DataUtamaPage() {
     let cancelled = false;
     (async () => {
       try {
-        const client = getSupabaseBrowser();
-        const options = await getRegionalOptions(client);
+        // Via API ber-sesi (service_role): query browser langsung
+        // (anon key) ditolak RLS (20261006000000_pii_rls_lockdown.sql).
+        const res = await fetch("/api/data-utama/regionals");
+        const body = (await res.json()) as {
+          regionals?: unknown;
+          error?: string;
+        };
+        if (!res.ok) {
+          throw new Error(body.error || "Gagal memuat regional.");
+        }
+        const options = Array.isArray(body.regionals)
+          ? (body.regionals.filter((r) => typeof r === "string") as string[])
+          : [];
         if (!cancelled) setRegionals(options);
       } catch {
         if (!cancelled) setRegionals([]);

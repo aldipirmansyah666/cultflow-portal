@@ -1,13 +1,14 @@
 /**
- * /api/resi — monitoring resi (butuh login, semua role).
+ * /api/resi — monitoring resi (butuh login, semua role; DELETE khusus ADMIN).
  * GET: daftar + filter status/search/paginasi.
  * PATCH: tandai follow-up {id, catatan} (user dari sesi).
  * POST: batch import copas {rows: ResiCopasItem[]} (maks 500).
+ * DELETE: hapus massal {id?, ids?[]} (khusus ADMIN, maks RESI_DELETE_MAX_IDS).
  */
 
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
-import { getSession } from "@/lib/session";
+import { getSession, isAdminSession } from "@/lib/session";
 import {
   classifyResiDbError,
   deleteResiBatch,
@@ -17,6 +18,7 @@ import {
   normalizeFollowUpStatus,
   purgeExpiredResi,
   RESI_COPAS_MAX_ROWS,
+  RESI_DELETE_MAX_IDS,
   RESI_STATUS_CHOICES,
   sanitizeNomorResi,
   updateFollowUpStatus,
@@ -170,6 +172,12 @@ export async function DELETE(req: Request) {
   if (!session) {
     return NextResponse.json({ error: "Tidak terautentikasi" }, { status: 401 });
   }
+  if (!isAdminSession(session)) {
+    return NextResponse.json(
+      { error: "Hanya ADMIN yang boleh menghapus resi" },
+      { status: 403 }
+    );
+  }
   let body: unknown;
   try {
     body = await req.json();
@@ -197,6 +205,16 @@ export async function DELETE(req: Request) {
   }
   if (list.length === 0) {
     return NextResponse.json({ error: "ID/ids wajib diisi" }, { status: 400 });
+  }
+  if (list.length > RESI_DELETE_MAX_IDS) {
+    return NextResponse.json(
+      {
+        error:
+          `Maksimal ${RESI_DELETE_MAX_IDS} id per hapus massal ` +
+          `(pecah menjadi beberapa batch)`,
+      },
+      { status: 413 }
+    );
   }
   try {
     const result = await deleteResiBatch(getSupabaseAdmin(), list);

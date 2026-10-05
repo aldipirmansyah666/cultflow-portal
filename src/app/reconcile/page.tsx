@@ -69,17 +69,16 @@ export default function ReconcilePage() {
     setParseError(null);
     setResult(null);
     try {
-      // xlsx (~400KB) dimuat on-demand agar tidak membebani initial load.
-      const { read, utils } = await import("xlsx");
+      // exceljs dimuat on-demand agar tidak membebani initial load.
+      const { loadWorkbookFromBuffer, validateMatrixLimits } =
+        await import("@/lib/excel");
       const buffer = await file.arrayBuffer();
-      const workbook = read(buffer, { type: "array" });
-      const firstSheet = workbook.Sheets[workbook.SheetNames[0] ?? ""];
-      if (!firstSheet) throw new Error("Berkas tidak berisi sheet.");
-      const matrix = utils.sheet_to_json<unknown[]>(firstSheet, {
-        header: 1,
-        defval: null,
-        raw: true,
-      });
+      const workbook = await loadWorkbookFromBuffer(buffer, { defval: null });
+      const firstName = workbook.sheetNames[0] ?? "";
+      const matrix = workbook.matrices.get(firstName) ?? [];
+      if (workbook.sheetNames.length === 0 || matrix.length === 0)
+        throw new Error("Berkas tidak berisi sheet.");
+      validateMatrixLimits(matrix, { maxRows: 20030, maxCols: 200 });
       const header = findReconcileHeader(matrix);
       if (!header) {
         throw new Error(
