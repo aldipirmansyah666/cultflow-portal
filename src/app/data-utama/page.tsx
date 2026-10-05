@@ -29,7 +29,7 @@ import {
 } from "@/core/services/dataUtamaService";
 import { cn } from "@/lib/utils";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 50;
 const SEARCH_DEBOUNCE_MS = 350;
 
 const dateFormatter = new Intl.DateTimeFormat("id-ID", {

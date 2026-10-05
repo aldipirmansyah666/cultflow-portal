@@ -87,6 +87,41 @@ async function loadSummaryViaRpc(
 }
 
 /**
+ * Ringkasan Master via agregasi SQL (`loket_profiles_summary()`:
+ * DISTINCT periode, COUNT(DISTINCT ppid), SUM(total_fee) status terbayar —
+ * lihat migration 20261007000000). Null bila RPC gagal (mis. fungsi belum
+ * dimigrasi) agar pemanggil jatuh ke fallback paginasi.
+ * Status terbayar mengikuti isPaidStatus(): TERBAYAR/KE_DEPOSIT/
+ * TRANSFER_REKENING/TOPUP_SISA — konsisten dengan agregasi JS.
+ */
+async function loadProfilesSummaryViaRpc(
+  admin: SupabaseClient
+): Promise<{ summary: FeeSummary } | null> {
+  const { data, error } = await admin.rpc("loket_profiles_summary");
+  if (error || data === null || typeof data !== "object") return null;
+  const s = data as {
+    periods?: unknown;
+    latestPeriode?: unknown;
+    totalLoket?: unknown;
+    totalTerbayarAktif?: unknown;
+  };
+  const periods = (Array.isArray(s.periods) ? s.periods : [])
+    .map((p) => String(p ?? ""))
+    .filter((p) => p !== "")
+    .sort((a, b) => b.localeCompare(a));
+  const latestPeriode =
+    typeof s.latestPeriode === "string" ? s.latestPeriode : "";
+  return {
+    summary: {
+      periods,
+      latestPeriode,
+      totalLoket: toSafeRupiah(s.totalLoket),
+      totalTerbayarAktif: toSafeRupiah(s.totalTerbayarAktif),
+    },
+  };
+}
+
+/**
  * Fallback bila RPC belum tersedia: agregasi lengkap via paginasi
  * `.range()` (tanpa `.limit(5000)` yang memotong diam-diam).
  * Melempar error DB asli agar diklasifikasi pemanggil.
@@ -285,7 +320,11 @@ async function queryProfiles(
   const total = Math.max(0, count ?? 0);
   if (total === 0) return null;
   const rows = data ?? [];
-  const summary = await summarizeProfiles(admin);
+  // Ringkasan SELALU lengkap: agregasi SQL via RPC dulu (1 round-trip),
+  // fallback paginasi penuh bila fungsi belum dimigrasi. Tidak ada lagi
+  // full-table scan PostgREST di setiap request bila RPC tersedia.
+  const viaRpc = await loadProfilesSummaryViaRpc(admin);
+  const summary = viaRpc ? viaRpc.summary : await summarizeProfiles(admin);
   return {
     // Baris mentah snake_case (angka bigint bisa string) — klien memetakan
     // via toFeeRekapRowFromProfil dengan koersi parseAmount per kolom.
@@ -306,7 +345,8 @@ async function queryProfiles(
 }
 
 /**
- * Agregasi ringkasan dari `loket_profiles` via paginasi penuh:
+ * FALLBACK agregasi ringkasan dari `loket_profiles` via paginasi penuh
+ * (dipakai bila RPC `loket_profiles_summary` belum dimigrasi):
  * periode unik, terbaru, COUNT(DISTINCT ppid) + SUM(total_fee) status
  * terbayar pada periode terbaru. Melempar error DB asli.
  */

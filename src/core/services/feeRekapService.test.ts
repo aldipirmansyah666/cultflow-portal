@@ -3,6 +3,7 @@ import {
   buildCariSlipText,
   buildFeeAgentProfile,
   buildFeeCsv,
+  buildFullModuleBreakdown,
   buildModuleBreakdown,
   CARI_MODULE_MAP,
   classifyFeeDbError,
@@ -1227,6 +1228,57 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
         totalCol: 181,
       })
     ).toBeNull();
+  });
+
+  it("buildFullModuleBreakdown: katalog penuh + nol untuk yang non-aktif", () => {
+    const full = buildFullModuleBreakdown([
+      { modul: "PLN Postpaid", lembar: 56, feePerLembar: 2050, total: 114800 },
+      { modul: "PBB", lembar: 3, feePerLembar: 3000, total: 9000 },
+    ]);
+    // Panjang = katalog kanonis, urutan mengikuti parser `Cari`.
+    expect(full).toHaveLength(CARI_MODULE_MAP.length);
+    expect(full.map((d) => d.modul)).toEqual(
+      CARI_MODULE_MAP.map((m) => m.modul)
+    );
+    // Modul kunci (PLN, Jastel, leasing, PBB, Fee Pos/Sicepat) wajib ada.
+    for (const name of [
+      "PLN Postpaid",
+      "PLN Prepaid",
+      "PLN Nontaglis",
+      "JASTEL",
+      "INDOVISION",
+      "FIF",
+      "WOM FINANCE",
+      "ADIRA",
+      "PBB",
+      "FEE LOKET POS",
+      "FEE LOKET SICEPAT NETT",
+    ]) {
+      expect(full.map((d) => d.modul)).toContain(name);
+    }
+    // Nilai aktif dipertahankan, non-aktif diisi nol.
+    expect(
+      full.find((d) => d.modul === "PLN Postpaid")
+    ).toEqual({ modul: "PLN Postpaid", lembar: 56, feePerLembar: 2050, total: 114800 });
+    expect(full.find((d) => d.modul === "JASTEL")).toEqual({
+      modul: "JASTEL",
+      lembar: 0,
+      feePerLembar: 0,
+      total: 0,
+    });
+    // Total tidak berubah (nol tidak menambah).
+    expect(full.reduce((s, d) => s + d.total, 0)).toBe(114800 + 9000);
+  });
+
+  it("buildFullModuleBreakdown: kosong -> seluruh katalog nol; nama asing di ekor", () => {
+    const full = buildFullModuleBreakdown([]);
+    expect(full).toHaveLength(CARI_MODULE_MAP.length);
+    expect(full.every((d) => d.lembar === 0 && d.total === 0)).toBe(true);
+    const withExtra = buildFullModuleBreakdown([
+      { modul: "MODUL LAMA", lembar: 1, feePerLembar: 500, total: 500 },
+    ]);
+    expect(withExtra).toHaveLength(CARI_MODULE_MAP.length + 1);
+    expect(withExtra[withExtra.length - 1]?.modul).toBe("MODUL LAMA");
   });
 
   it("parseLoketBsbFull: identitas + keuangan + rincian + status", () => {

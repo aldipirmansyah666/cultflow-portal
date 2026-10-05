@@ -2567,6 +2567,36 @@ export function buildModuleBreakdown(
   return { modul: map.modul, lembar, feePerLembar, total };
 }
 
+/**
+ * Katalog modul penuh untuk tabel rincian: left-join urutan kanonis
+ * `CARI_MODULE_MAP` (79 modul: PLN Postpaid/Prepaid/Nontaglis, JASTEL,
+ * INDOVISION, BPJS, leasing FIF/WOM/Adira, E-Commerce, PBB, Fee Loket
+ * Pos/Sicepat Nett, ...) dengan baris aktif dari DB
+ * (`loket_transaction_details`, sparse — hanya modul beraktivitas).
+ * Modul tanpa aktivitas diisi nol agar tabel "Rincian Transaksi" selalu
+ * menampilkan daftar penuh sesuai struktur parser, bukan hanya yang aktif.
+ * Baris DB bernama di luar katalog (data lama) ditambahkan di ekor.
+ */
+export function buildFullModuleBreakdown(
+  active: TransactionBreakdown[]
+): TransactionBreakdown[] {
+  const byModul = new Map<string, TransactionBreakdown>();
+  for (const d of active) {
+    if (!d || typeof d.modul !== "string" || d.modul === "") continue;
+    if (!byModul.has(d.modul)) byModul.set(d.modul, d);
+  }
+  const out: TransactionBreakdown[] = CARI_MODULE_MAP.map((m) => {
+    const hit = byModul.get(m.modul);
+    if (hit) {
+      byModul.delete(m.modul);
+      return hit;
+    }
+    return { modul: m.modul, lembar: 0, feePerLembar: 0, total: 0 };
+  });
+  for (const rest of byModul.values()) out.push(rest);
+  return out;
+}
+
 export interface LoketBsbFullParse {
   /** Profil lengkap per loket (untuk loket_profiles + details). */
   profiles: LoketProfileFull[];

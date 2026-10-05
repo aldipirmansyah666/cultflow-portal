@@ -47,6 +47,7 @@ import {
   buildFeeAgentSlipText,
   buildFeeCsv,
   buildFeeSlipText,
+  buildFullModuleBreakdown,
   buildPeriode,
   deleteFeeRows,
   detectFeeHeader,
@@ -156,6 +157,17 @@ function CariSlipGrid({
   details: TransactionBreakdown[];
   legacy: boolean;
 }) {
+  // Daftar penuh 79 modul katalog (urutan parser `Cari`): DB hanya
+  // menyimpan modul beraktivitas, sisanya diisi nol di sini agar tabel
+  // kanan selalu lengkap. Data legacy tidak punya rincian sama sekali.
+  const [showZero, setShowZero] = useState(true);
+  const fullDetails = legacy ? [] : buildFullModuleBreakdown(details);
+  const visibleDetails = showZero
+    ? fullDetails
+    : fullDetails.filter((d) => d.lembar !== 0 || d.total !== 0);
+  const activeCount = fullDetails.filter(
+    (d) => d.lembar !== 0 || d.total !== 0
+  ).length;
   return (
     <div className="grid gap-0 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       {/* KIRI — Slip Keuangan & Profil Agen (C6:E27). */}
@@ -196,20 +208,32 @@ function CariSlipGrid({
       </div>
       {/* KANAN — Tabel Rincian Transaksi per Modul (K-N). */}
       <div className="bg-slate-50/60 px-4 py-3 sm:px-6">
-        <p className="mb-2 text-[11px] font-bold tracking-widest text-slate-500 uppercase">
-          Rincian Transaksi
-          {legacy && " · (data legacy — tanpa rincian modul)"}
-        </p>
-        {details.length === 0 ? (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <p className="text-[11px] font-bold tracking-widest text-slate-500 uppercase">
+            Rincian Transaksi
+            {legacy && " · (data legacy — tanpa rincian modul)"}
+          </p>
+          {!legacy && fullDetails.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowZero((v) => !v)}
+              aria-pressed={showZero}
+              className="ml-auto rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50"
+            >
+              {showZero ? "Sembunyikan modul nol" : "Tampilkan semua modul"}
+            </button>
+          )}
+        </div>
+        {legacy || visibleDetails.length === 0 ? (
           <p className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-slate-500">
             {legacy
               ? "Profil ini berasal dari data lama (sebelum perombakan Master). Impor ulang file Excel Loket BSB untuk mengisi rincian modul."
               : "Belum ada transaksi modul pada periode ini (seluruh modul nol)."}
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+          <div className="max-h-[480px] overflow-auto rounded-xl border border-slate-200 bg-white">
             <table className="w-full min-w-[520px] text-left text-xs">
-              <thead>
+              <thead className="sticky top-0">
                 <tr className="bg-slate-900 text-[11px] tracking-wider text-slate-200 uppercase">
                   <th scope="col" className="px-3 py-2 font-semibold">Modul</th>
                   <th scope="col" className="px-3 py-2 text-right font-semibold">Lembar</th>
@@ -218,24 +242,33 @@ function CariSlipGrid({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {details.map((d) => (
-                  <tr key={d.modul}>
-                    <td className="px-3 py-1.5 font-semibold text-slate-800">{d.modul}</td>
-                    <td className="px-3 py-1.5 text-right text-slate-600">{formatNumber(d.lembar)}</td>
-                    <td className="px-3 py-1.5 text-right text-slate-600">{formatRupiah(d.feePerLembar)}</td>
-                    <td className="px-3 py-1.5 text-right font-bold text-emerald-700">{formatRupiah(d.total)}</td>
-                  </tr>
-                ))}
+                {visibleDetails.map((d) => {
+                  const inactive = d.lembar === 0 && d.total === 0;
+                  return (
+                    <tr key={d.modul} className={inactive ? "bg-slate-50/50" : undefined}>
+                      <td className="px-3 py-1.5 font-semibold text-slate-800">{d.modul}</td>
+                      <td className="px-3 py-1.5 text-right text-slate-600">
+                        {inactive ? <span className="text-slate-300">0</span> : formatNumber(d.lembar)}
+                      </td>
+                      <td className="px-3 py-1.5 text-right text-slate-600">
+                        {inactive ? <span className="text-slate-300">—</span> : formatRupiah(d.feePerLembar)}
+                      </td>
+                      <td className="px-3 py-1.5 text-right font-bold text-emerald-700">
+                        {inactive ? <span className="font-medium text-slate-300">Rp 0</span> : formatRupiah(d.total)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
-              <tfoot>
+              <tfoot className="sticky bottom-0">
                 <tr className="border-t-2 border-slate-200 bg-slate-50">
                   <td className="px-3 py-2 text-xs font-extrabold text-slate-900 uppercase">Total</td>
                   <td className="px-3 py-2 text-right text-xs font-bold text-slate-700">
-                    {formatNumber(details.reduce((s, d) => s + d.lembar, 0))}
+                    {formatNumber(visibleDetails.reduce((s, d) => s + d.lembar, 0))}
                   </td>
                   <td className="px-3 py-2" />
                   <td className="px-3 py-2 text-right text-xs font-extrabold text-emerald-700">
-                    {formatRupiah(details.reduce((s, d) => s + d.total, 0))}
+                    {formatRupiah(visibleDetails.reduce((s, d) => s + d.total, 0))}
                   </td>
                 </tr>
               </tfoot>
@@ -243,7 +276,9 @@ function CariSlipGrid({
           </div>
         )}
         <p className="mt-1.5 text-[11px] text-slate-400">
-          Modul tanpa transaksi disembunyikan · {details.length} modul aktif
+          {legacy
+            ? "Rincian modul hanya tersedia untuk data Master (Loket BSB)."
+            : `${fullDetails.length} modul katalog · ${activeCount} modul aktif`}
         </p>
       </div>
     </div>

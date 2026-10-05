@@ -46,7 +46,7 @@ export async function GET(req: Request) {
   const page = toPositiveInt(params.get("page"), 1);
   const pageSize = Math.min(
     MAX_PAGE_SIZE,
-    toPositiveInt(params.get("pageSize"), 20)
+    toPositiveInt(params.get("pageSize"), 50)
   );
   try {
     const result = await getDataUtamaList(getSupabaseAdmin(), {
