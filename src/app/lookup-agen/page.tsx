@@ -17,7 +17,7 @@ import {
   type AgenProfile,
   type AgenSuggestItem,
 } from "@/core/services/dataUtamaService";
-import { cn } from "@/lib/utils";
+import { cn, copyTextToClipboard } from "@/lib/utils";
 
 const SUGGEST_DEBOUNCE_MS = 300;
 const SUGGEST_MIN_CHARS = 2;
@@ -203,15 +203,11 @@ function LookupAgenView() {
 
   async function copyWaText(profile: AgenProfile) {
     const text = buildLookupWaText(profile);
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+    // Helper tidak pernah melempar; klaim "Tersalin" hanya bila sukses.
+    const ok = await copyTextToClipboard(text);
+    if (!ok) {
+      console.warn("[lookup-agen] salin ke clipboard gagal");
+      return;
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);

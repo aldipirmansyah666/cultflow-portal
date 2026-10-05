@@ -83,7 +83,7 @@ import {
   validateExcelMagicBytes,
   validateFileSize,
 } from "@/lib/fileValidation";
-import { cn } from "@/lib/utils";
+import { cn, copyTextToClipboard, downloadBlob } from "@/lib/utils";
 
 type TabKey = "monitoring" | "upload";
 
@@ -251,7 +251,14 @@ function CariSlipGrid({
                         {inactive ? <span className="text-slate-300">0</span> : formatNumber(d.lembar)}
                       </td>
                       <td className="px-3 py-1.5 text-right text-slate-600">
-                        {inactive ? <span className="text-slate-300">—</span> : formatRupiah(d.feePerLembar)}
+                        {/* FEE/LEMBAR selalu ditampilkan apa adanya (termasuk
+                            Rp 0) agar selaras format master Excel — tidak
+                            pernah strip/dikosongkan. */}
+                        {inactive ? (
+                          <span className="text-slate-400">{formatRupiah(d.feePerLembar)}</span>
+                        ) : (
+                          formatRupiah(d.feePerLembar)
+                        )}
                       </td>
                       <td className="px-3 py-1.5 text-right font-bold text-emerald-700">
                         {inactive ? <span className="font-medium text-slate-300">Rp 0</span> : formatRupiah(d.total)}
@@ -663,15 +670,11 @@ export default function FeeRekapPage() {
   }
 
   async function copyText(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+    // Helper tidak pernah melempar; klaim "Tersalin" hanya bila sukses.
+    const ok = await copyTextToClipboard(text);
+    if (!ok) {
+      setToast("Gagal menyalin. Salin manual dari layar.");
+      return;
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -753,38 +756,52 @@ export default function FeeRekapPage() {
   }
 
   function downloadCsv() {
-    const blob = new Blob([buildFeeCsv(filtered)], {
-      type: "text/csv;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setToast(`${filtered.length} baris diekspor ke CSV.`);
+    try {
+      const blob = new Blob([buildFeeCsv(filtered)], {
+        type: "text/csv;charset=utf-8",
+      });
+      downloadBlob(
+        blob,
+        `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.csv`
+      );
+      setToast(`${filtered.length} baris diekspor ke CSV.`);
+    } catch (err) {
+      setToast(
+        err instanceof Error
+          ? `Gagal mengekspor CSV: ${err.message}`
+          : "Gagal mengekspor CSV di browser ini."
+      );
+    }
   }
 
   async function downloadExcel() {
-    const { downloadAoaAsXlsx } = await import("@/lib/excel");
-    const aoa: (string | number)[][] = [
-      ["No", "PPID", "Nama Loket", "Periode", "Total Fee (Rp)", "Status"],
-      ...filtered.map((r, i) => [
-        i + 1,
-        r.ppid,
-        r.namaLoket,
-        formatPeriode(r.periode),
-        r.totalFee,
-        r.status,
-      ] as (string | number)[]),
-    ];
-    await downloadAoaAsXlsx(
-      `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.xlsx`,
-      "Rekap Fee",
-      aoa,
-      [5, 18, 28, 18, 18, 12]
-    );
-    setToast(`${filtered.length} baris diekspor ke Excel.`);
+    try {
+      const { downloadAoaAsXlsx } = await import("@/lib/excel");
+      const aoa: (string | number)[][] = [
+        ["No", "PPID", "Nama Loket", "Periode", "Total Fee (Rp)", "Status"],
+        ...filtered.map((r, i) => [
+          i + 1,
+          r.ppid,
+          r.namaLoket,
+          formatPeriode(r.periode),
+          r.totalFee,
+          r.status,
+        ] as (string | number)[]),
+      ];
+      await downloadAoaAsXlsx(
+        `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.xlsx`,
+        "Rekap Fee",
+        aoa,
+        [5, 18, 28, 18, 18, 12]
+      );
+      setToast(`${filtered.length} baris diekspor ke Excel.`);
+    } catch (err) {
+      setToast(
+        err instanceof Error
+          ? `Gagal mengekspor Excel: ${err.message}`
+          : "Gagal mengekspor Excel di browser ini."
+      );
+    }
   }
 
   // --- Upload handlers (parse lokal -> simpan via API ADMIN) ---
@@ -1802,12 +1819,7 @@ export default function FeeRekapPage() {
                                 [JSON.stringify(dump, null, 2)],
                                 { type: "application/json;charset=utf-8" }
                               );
-                              const url = URL.createObjectURL(blob);
-                              const a = document.createElement("a");
-                              a.href = url;
-                              a.download = "fee-diagnostik.json";
-                              a.click();
-                              URL.revokeObjectURL(url);
+                              downloadBlob(blob, "fee-diagnostik.json");
                             }}
                             className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                           >

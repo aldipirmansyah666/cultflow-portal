@@ -28,6 +28,7 @@ import {
   validateExcelMagicBytes,
   validateFileSize,
 } from "@/lib/fileValidation";
+import { copyTextToClipboard } from "@/lib/utils";
 
 /** Tampilkan tanggal Excel/ISO sebagai DD/MM/YYYY (port opr-portal). */
 function formatDateDDMMYYYY(value: unknown): string {
@@ -144,16 +145,11 @@ export default function BaggingPage() {
   }
 
   async function handleCopy(text: string, agen: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // fallback untuk insecure contexts
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+    // Helper tidak pernah melempar; klaim "Tersalin" hanya bila sukses.
+    const ok = await copyTextToClipboard(text);
+    if (!ok) {
+      console.warn("[bagging] salin ke clipboard gagal");
+      return;
     }
     setCopiedAgen(agen);
     setTimeout(() => setCopiedAgen(null), 2000);

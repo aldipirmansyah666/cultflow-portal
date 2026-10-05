@@ -29,6 +29,7 @@ import {
   validateExcelMagicBytes,
   validateFileSize,
 } from "@/lib/fileValidation";
+import { copyTextToClipboard, downloadBlob } from "@/lib/utils";
 
 const idr = new Intl.NumberFormat("id-ID");
 
@@ -127,15 +128,11 @@ export default function BailoutPage() {
   }
 
   async function handleCopy(text: string, idx: number) {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+    // Helper tidak pernah melempar; klaim "Tersalin" hanya bila sukses.
+    const ok = await copyTextToClipboard(text);
+    if (!ok) {
+      console.warn("[bailout] salin ke clipboard gagal");
+      return;
     }
     setCopiedIdx(idx);
     setTimeout(() => setCopiedIdx(null), 2000);
@@ -143,12 +140,7 @@ export default function BailoutPage() {
 
   function downloadCsv() {
     const blob = new Blob([toCsv(data)], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `bailout-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `bailout-${new Date().toISOString().slice(0, 10)}.csv`);
   }
 
   const totalMinus = useMemo(

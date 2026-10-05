@@ -20,6 +20,7 @@
  */
 
 import ExcelJS from "exceljs";
+import { downloadBlob } from "@/lib/utils";
 
 export const EXCEL_MAX_CELL_CHARS = 32767;
 
@@ -381,10 +382,6 @@ export async function downloadAoaAsXlsx(
   const blob = new Blob([bytes.buffer as ArrayBuffer], {
     type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.click();
-  URL.revokeObjectURL(url);
+  // Lewat helper bersama: anchor masuk DOM (Safari) + revoke tertunda.
+  downloadBlob(blob, fileName);
 }
