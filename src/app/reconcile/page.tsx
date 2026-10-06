@@ -70,15 +70,30 @@ export default function ReconcilePage() {
     setResult(null);
     try {
       // exceljs dimuat on-demand agar tidak membebani initial load.
-      const { loadWorkbookFromBuffer, validateMatrixLimits } =
+      const { loadWorkbookFromBuffer, validateMatrixLimits, MatrixLimitError } =
         await import("@/lib/excel");
       const buffer = await file.arrayBuffer();
-      const workbook = await loadWorkbookFromBuffer(buffer, { defval: null });
+      const workbook = await loadWorkbookFromBuffer(buffer, {
+        defval: null,
+        fileName: file.name,
+      });
       const firstName = workbook.sheetNames[0] ?? "";
       const matrix = workbook.matrices.get(firstName) ?? [];
       if (workbook.sheetNames.length === 0 || matrix.length === 0)
-        throw new Error("Berkas tidak berisi sheet.");
-      validateMatrixLimits(matrix, { maxRows: 20030, maxCols: 200 });
+        throw new Error(`Berkas "${file.name}" tidak berisi sheet.`);
+      try {
+        validateMatrixLimits(matrix, {
+          maxRows: 20030,
+          maxCols: 200,
+          fileName: file.name,
+          sheetName: firstName,
+        });
+      } catch (e) {
+        // Pesan sudah spesifik (alamat sel + preview + hint) dari excel.ts.
+        // Tambahkan konteks sheet agar auditor langsung tahu lokasi.
+        if (e instanceof MatrixLimitError) throw e;
+        throw e;
+      }
       const header = findReconcileHeader(matrix);
       if (!header) {
         throw new Error(
@@ -174,10 +189,18 @@ export default function ReconcilePage() {
           )}
         </div>
         {parseError && (
-          <p role="alert" className="mt-3 flex items-center gap-2 text-sm text-red-600">
-            <XCircle className="size-4 shrink-0" aria-hidden />
-            {parseError}
-          </p>
+          <div role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
+            <p className="flex items-start gap-2 text-sm text-red-700">
+              <XCircle className="mt-0.5 size-4 shrink-0" aria-hidden />
+              <span className="break-words whitespace-pre-wrap">{parseError}</span>
+            </p>
+            <p className="mt-2 pl-6 text-xs text-red-600">
+              Tips: buka file di Excel → periksa sel yang dilaporkan → hapus
+              tanda kutip (") liar / teks tempelan panjang → simpan ulang
+              sebagai .xlsx lalu unggah kembali. Jika file berekstensi .csv,
+              buka dengan Notepad dan pastikan delimiter konsisten (; atau ,).
+            </p>
+          </div>
         )}
       </section>
 

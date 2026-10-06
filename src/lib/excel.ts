@@ -23,12 +23,66 @@ import ExcelJS from "exceljs";
 import { downloadBlob } from "@/lib/utils";
 
 export const EXCEL_MAX_CELL_CHARS = 32767;
+/** Batas total karakter seluruh matriks agar file korup tidak menghabiskan memori. */
+export const EXCEL_MAX_TOTAL_CHARS = 20_000_000;
 
 export interface MatrixLimits {
   maxRows: number;
   maxCols: number;
   maxCellChars?: number;
+  /** Batas total karakter (default 20 juta). */
+  maxTotalChars?: number;
+  /**
+   * 'throw' (default): lempar error informatif.
+   * 'truncate': potong sel berlebih + kembalikan peringatan (untuk alur audit).
+   */
+  onOversizeCell?: "throw" | "truncate";
+  /** Konteks untuk pesan error agar mudah diaudit. */
+  fileName?: string;
+  sheetName?: string;
 }
+
+export interface CellViolation {
+  row: number; // 1-based
+  col: number; // 1-based
+  address: string; // "A4"
+  length: number;
+  preview: string;
+}
+
+export interface MatrixLimitReport {
+  truncatedCells: CellViolation[];
+  warnings: string[];
+}
+
+/** Error terstruktur agar UI bisa menampilkan lokasi persis + saran perbaikan. */
+export class MatrixLimitError extends Error {
+  code: "CELL_TOO_LONG" | "TOO_MANY_ROWS" | "TOO_MANY_COLS" | "TOTAL_TOO_LARGE";
+  fileName?: string;
+  sheetName?: string;
+  violations: CellViolation[];
+  hint: string;
+  constructor(
+    code: MatrixLimitError["code"],
+    message: string,
+    opts: {
+      fileName?: string;
+      sheetName?: string;
+      violations?: CellViolation[];
+      hint?: string;
+    } = {}
+  ) {
+    super(message);
+    this.name = "MatrixLimitError";
+    this.code = code;
+    this.fileName = opts.fileName;
+    this.sheetName = opts.sheetName;
+    this.violations = opts.violations ?? [];
+    this.hint = opts.hint ?? "";
+  }
+}
+
+/** "A1:B2" -> { s:{r,c}, e:{r,c} } 0-based (format kompatibel fillMergedCells). */
 
 export interface MergeLike {
   s: { r: number; c: number };
@@ -60,13 +114,26 @@ export function normalizeCellValue(value: ExcelJS.CellValue): unknown {
       ) {
         return result;
       }
-      return String(result);
+      // Guard: String(result) objek aneh bisa meledak — batasi.
+      const s = String(result);
+      return s.length > EXCEL_MAX_CELL_CHARS + 1024
+        ? s.slice(0, EXCEL_MAX_CELL_CHARS + 1024)
+        : s;
     }
-    // Rich text: { richText: [{text}] } -> gabungkan.
+    // Rich text: { richText: [{text}] } -> gabungkan (dengan batas progresif
+    // agar file korup dengan ribuan fragmen tidak merangkai string raksasa).
     if (Array.isArray(v.richText)) {
-      return (v.richText as { text?: unknown }[])
-        .map((part) => (typeof part.text === "string" ? part.text : ""))
-        .join("");
+      const parts = v.richText as { text?: unknown }[];
+      let out = "";
+      for (const part of parts) {
+        if (typeof part.text !== "string") continue;
+        out += part.text;
+        if (out.length > EXCEL_MAX_CELL_CHARS + 1024) {
+          out = out.slice(0, EXCEL_MAX_CELL_CHARS + 1024);
+          break;
+        }
+      }
+      return out;
     }
     // Hyperlink: { text, hyperlink } -> teks tampilan.
     if (typeof v.text === "string") return v.text;
@@ -101,37 +168,112 @@ export function worksheetToMatrix(
   return matrix;
 }
 
-/** Validasi batas matriks; throw pesan Indonesia yang jelas bila lewat. */
+/** Potong preview agar pesan error tidak ikut membesar. */
+function cellPreview(cell: string, len = 120): string {
+  const oneLine = cell.replace(/\s+/g, " ").trim();
+  return oneLine.length > len ? `${oneLine.slice(0, len)}…` : oneLine;
+}
+
+function wherePrefix(limits: MatrixLimits): string {
+  const parts: string[] = [];
+  if (limits.fileName) parts.push(`Berkas "${limits.fileName}"`);
+  if (limits.sheetName) parts.push(`sheet "${limits.sheetName}"`);
+  return parts.length > 0 ? `${parts.join(" · ")} · ` : "";
+}
+
+/**
+ * Validasi batas matriks; resilient terhadap sel korup raksasa.
+ * - Mode 'throw' (default): lempar MatrixLimitError dengan alamat sel (A4),
+ *   panjang aktual, preview isi, dan hint perbaikan.
+ * - Mode 'truncate': potong sel berlebih ke maxCellChars, kembalikan laporan
+ *   via `report` (tidak throw untuk CELL_TOO_LONG).
+ */
 export function validateMatrixLimits(
   matrix: unknown[][],
-  limits: MatrixLimits
+  limits: MatrixLimits,
+  report?: MatrixLimitReport
 ): void {
   const maxCell = limits.maxCellChars ?? EXCEL_MAX_CELL_CHARS;
+  const maxTotal = limits.maxTotalChars ?? EXCEL_MAX_TOTAL_CHARS;
+  const mode = limits.onOversizeCell ?? "throw";
+  const prefix = wherePrefix(limits);
   if (matrix.length > limits.maxRows) {
-    throw new Error(
-      `Terlalu banyak baris (${matrix.length}). Maksimal ${limits.maxRows}. Pecah file menjadi beberapa bagian.`
-    );
+    throw new MatrixLimitError("TOO_MANY_ROWS", `${prefix}Terlalu banyak baris (${matrix.length}). Maksimal ${limits.maxRows}. Pecah file menjadi beberapa bagian.`, {
+      fileName: limits.fileName,
+      sheetName: limits.sheetName,
+      hint: "Pecah file menjadi beberapa bagian < 20.000 baris data.",
+    });
   }
   let width = 0;
   for (const row of matrix.slice(0, Math.min(matrix.length, 10))) {
     if (Array.isArray(row) && row.length > width) width = row.length;
   }
   if (width > limits.maxCols) {
-    throw new Error(
-      `Terlalu banyak kolom (${width}). Maksimal ${limits.maxCols}.`
-    );
+    throw new MatrixLimitError("TOO_MANY_COLS", `${prefix}Terlalu banyak kolom (${width}). Maksimal ${limits.maxCols}.`, {
+      fileName: limits.fileName,
+      sheetName: limits.sheetName,
+      hint: "Hapus kolom jauh di kanan (mis. XFD) lalu simpan ulang sebagai .xlsx.",
+    });
   }
+  const violations: CellViolation[] = [];
+  let total = 0;
   for (let r = 0; r < matrix.length; r += 1) {
     const row = matrix[r];
     if (!Array.isArray(row)) continue;
     for (let c = 0; c < row.length; c += 1) {
       const cell = row[c];
-      if (typeof cell === "string" && cell.length > maxCell) {
-        throw new Error(
-          `Sel baris ${r + 1} kolom ${c + 1} terlalu panjang (${cell.length} karakter). Maksimal ${maxCell}.`
-        );
+      if (typeof cell !== "string") continue;
+      total += cell.length;
+      if (cell.length > maxCell) {
+        const v: CellViolation = {
+          row: r + 1,
+          col: c + 1,
+          address: encodeCellAddress(r, c),
+          length: cell.length,
+          preview: cellPreview(cell),
+        };
+        if (mode === "truncate") {
+          row[c] = cell.slice(0, maxCell);
+          violations.push(v);
+          if (report) report.truncatedCells.push(v);
+        } else {
+          violations.push(v);
+        }
       }
     }
+    // Cek total bertahap agar tidak menunggu seluruh matriks saat file korup.
+    if (total > maxTotal && mode === "throw") {
+      throw new MatrixLimitError(
+        "TOTAL_TOO_LARGE",
+        `${prefix}Total isi file terlalu besar (~${total.toLocaleString("id-ID")} karakter). Kemungkinan ada sel korup yang menelan sebagian besar file.`,
+        {
+          fileName: limits.fileName,
+          sheetName: limits.sheetName,
+          violations,
+          hint: 'Buka file di Excel/Notepad, periksa tanda kutip (") tak berpasangan di sekitar baris yang dilaporkan, lalu simpan ulang sebagai .xlsx.',
+        }
+      );
+    }
+  }
+  if (violations.length > 0 && mode === "truncate") {
+    if (report) {
+      report.warnings.push(
+        `${violations.length} sel dipotong ke ${maxCell} karakter: ${violations.slice(0, 5).map((v) => `${v.address} (${v.length}→${maxCell})`).join(", ")}${violations.length > 5 ? ` +${violations.length - 5} lainnya` : ""}.`
+      );
+    }
+    return;
+  }
+  if (violations.length > 0) {
+    const first = violations.slice(0, 3)
+      .map((v) => `Sel ${v.address} (baris ${v.row} kolom ${v.col}): ${v.length.toLocaleString("id-ID")} karakter > maksimal ${maxCell.toLocaleString("id-ID")}. Isi awal: "${v.preview}"`)
+      .join(" ");
+    const hint =
+      'Kemungkinan penyebab: (1) tanda kutip (") tak berpasangan di CSV sehingga satu sel menelan ribuan baris; (2) delimiter salah terdeteksi (; vs , vs tab); (3) copy-paste teks panjang ke satu sel; (4) file .csv dibuka/disimpan dengan encoding/line-ending berbeda. Periksa baris tersebut di Notepad/Excel, hapus/rapikan kutipnya, lalu simpan ulang sebagai .xlsx dan unggah kembali.';
+    throw new MatrixLimitError(
+      "CELL_TOO_LONG",
+      `${prefix}${first}${violations.length > 3 ? ` (+${violations.length - 3} sel bermasalah lainnya).` : ""} ${hint}`,
+      { fileName: limits.fileName, sheetName: limits.sheetName, violations, hint }
+    );
   }
 }
 
@@ -194,43 +336,168 @@ function looksLikeCsv(buffer: ArrayBuffer): boolean {
   return !isZip && !isOle;
 }
 
-/** Parser CSV ringan: deteksi delimiter tab > `;` > `,` pada 5 baris pertama. */
-function parseCsvMatrix(text: string, defval: unknown): unknown[][] {
-  const lines = text.split(/\r?\n/);
-  const sample = lines.slice(0, 5).join("\n");
-  const tabs = (sample.match(/\t/g) ?? []).length;
-  const semis = (sample.match(/;/g) ?? []).length;
-  const commas = (sample.match(/,/g) ?? []).length;
-  const delim = tabs > 0 ? "\t" : semis >= commas ? ";" : ",";
+export interface CsvParseResult {
+  matrix: unknown[][];
+  /** Delimiter yang terdeteksi. */
+  delimiter: string;
+  /** Peringatan non-fatal: kutip tak berpasangan, baris tanpa newline, dll. */
+  warnings: string[];
+  /** Jumlah sel yang dipotong karena melebihi maxCellChars. */
+  truncatedCells: number;
+}
+
+/** Deteksi delimiter dari 5 baris pertama dengan skor (abaikan konten dalam kutip). */
+function detectCsvDelimiter(sample: string): string {
+  // Hapus segmen dalam kutip agar koma di dalam "a,b" tidak mengecoh hitungan.
+  const stripped = sample.replace(/"([^"]|"")*"?/g, "");
+  const lines = stripped.split(/\r\n|\n|\r/).slice(0, 5).filter((l) => l.trim() !== "");
+  if (lines.length === 0) return ";";
+  const count = (ch: string) =>
+    lines.reduce((n, l) => n + l.split(ch).length - 1, 0) / lines.length;
+  const tabs = count("\t");
+  if (tabs > 0) return "\t";
+  const semis = count(";");
+  const commas = count(",");
+  // Butuh konsistensi antar baris: pilih yang muncul di >50% baris.
+  const consistency = (ch: string) =>
+    lines.filter((l) => l.includes(ch)).length / lines.length;
+  if (semis > 0 && consistency(";") >= 0.5 && semis >= commas) return ";";
+  if (commas > 0 && consistency(",") >= 0.5) return ",";
+  return semis >= commas ? ";" : ",";
+}
+
+/**
+ * Parser CSV RFC-4180 yang resilient:
+ * - Mendukung field multi-baris dalam kutip ("a\nb"), CRLF/LF/CR tunggal.
+ * - `""` di dalam kutip = kutip literal.
+ * - Kutip tak berpasangan: baris dipulihkan (kutip dianggap literal) +
+ *   dicatat di warnings — inilah penyebab klasik "1 sel 2,8 juta karakter".
+ * - Guard maxCellChars saat merangkai (gagal cepat, tidak menunggu string
+ *   raksasa terbentuk) + guard total agar tidak OOM.
+ */
+export function parseCsvMatrix(
+  text: string,
+  defval: unknown,
+  opts: { maxCellChars?: number; maxTotalChars?: number } = {}
+): CsvParseResult {
+  const maxCell = opts.maxCellChars ?? EXCEL_MAX_CELL_CHARS;
+  const maxTotal = opts.maxTotalChars ?? EXCEL_MAX_TOTAL_CHARS;
+  const delim = detectCsvDelimiter(text.slice(0, 64_000));
   const matrix: unknown[][] = [];
-  for (const line of lines) {
-    if (line.trim() === "") continue;
-    // Split sederhana dengan dukungan quote ganda standar CSV.
-    const cells: unknown[] = [];
-    let cur = "";
-    let inQuotes = false;
-    for (let i = 0; i < line.length; i += 1) {
-      const ch = line[i];
+  const warnings: string[] = [];
+  let truncatedCells = 0;
+  let row: unknown[] = [];
+  let cur = "";
+  let inQuotes = false;
+  let quoteStartLine = 0;
+  let lineNo = 1;
+  let total = 0;
+  let truncatedCur = false;
+
+  const pushCell = () => {
+    const v = cur.trim();
+    total += cur.length;
+    row.push(v === "" ? defval : v);
+    cur = "";
+    truncatedCur = false;
+  };
+  const pushRow = () => {
+    // Abaikan baris yang seluruhnya kosong (defval semua).
+    const isEmpty = row.every((c) => c === defval);
+    if (!isEmpty) matrix.push(row);
+    row = [];
+  };
+
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] ?? "";
+    const next = text[i + 1] ?? "";
+
+    if (inQuotes) {
       if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') {
-          cur += '"';
-          i += 1;
+        if (next === '"') {
+          if (!truncatedCur && cur.length < maxCell) cur += '"';
+          i += 1; // konsumsi pasangan ""
         } else {
-          inQuotes = !inQuotes;
+          // Lihat ke depan: kutip penutup valid hanya jika diikuti
+          // delimiter / newline / akhir teks. Jika tidak, anggap kutip
+          // liar (mis. 8" atau 26"ASD) -> perlakukan sebagai literal.
+          if (next === delim || next === "\n" || next === "\r" || next === "") {
+            inQuotes = false;
+          } else {
+            if (!truncatedCur && cur.length < maxCell) cur += '"';
+            if (!truncatedCur && cur.length >= maxCell) {
+              truncatedCur = true;
+              truncatedCells += 1;
+            }
+          }
         }
-      } else if (ch === delim && !inQuotes) {
-        const v = cur.trim();
-        cells.push(v === "" ? defval : v);
-        cur = "";
       } else {
-        cur += ch;
+        if (ch === "\n") lineNo += 1;
+        if (!truncatedCur) {
+          if (cur.length < maxCell) cur += ch;
+          else {
+            truncatedCur = true;
+            truncatedCells += 1;
+          }
+        }
+        if (total + cur.length > maxTotal) {
+          warnings.push(
+            `Isi CSV melebihi batas total (~${maxTotal.toLocaleString("id-ID")} karakter) di sekitar baris ${lineNo}; parsing dihentikan dini agar aplikasi tidak kehabisan memori. Periksa tanda kutip tak berpasangan.`
+          );
+          pushCell();
+          pushRow();
+          return { matrix, delimiter: delim, warnings, truncatedCells };
+        }
+      }
+      continue;
+    }
+
+    // --- di luar kutip ---
+    if (ch === '"') {
+      // Kutip pembuka hanya valid di awal field (setelah delimiter/baris baru).
+      // Di tengah kata (mis. 8" ) -> literal, jangan masuk mode kutip.
+      if (cur === "") {
+        inQuotes = true;
+        quoteStartLine = lineNo;
+      } else {
+        if (cur.length < maxCell) cur += '"';
+      }
+    } else if (ch === delim) {
+      pushCell();
+    } else if (ch === "\r" && next === "\n") {
+      // CRLF -> akhir baris. Jika sebelumnya ada kutip tak berpasangan yang
+      // dibuka di baris ini dan tak pernah ditutup, pulihkan sebagai literal.
+      pushCell();
+      pushRow();
+      lineNo += 1;
+      i += 1;
+    } else if (ch === "\n" || ch === "\r") {
+      pushCell();
+      pushRow();
+      lineNo += 1;
+    } else {
+      if (cur.length < maxCell) cur += ch;
+      else if (!truncatedCur) {
+        truncatedCur = true;
+        truncatedCells += 1;
       }
     }
-    const v = cur.trim();
-    cells.push(v === "" ? defval : v);
-    matrix.push(cells);
   }
-  return matrix;
+
+  // Akhir teks saat masih dalam kutip = kutip tak berpasangan klasik.
+  if (inQuotes) {
+    warnings.push(
+      `Tanda kutip (") tak berpasangan mulai baris ${quoteStartLine}; diperlakukan sebagai teks biasa agar satu sel tidak menelan seluruh file.`
+    );
+  }
+  pushCell();
+  pushRow();
+  if (truncatedCells > 0) {
+    warnings.push(
+      `${truncatedCells} sel melebihi ${maxCell.toLocaleString("id-ID")} karakter dan dipotong. Jika ini terjadi di kolom resi, periksa kutip/delimiter file.`
+    );
+  }
+  return { matrix, delimiter: delim, warnings, truncatedCells };
 }
 
 export interface LoadedWorkbook {
@@ -249,9 +516,10 @@ export interface LoadedWorkbook {
  */
 export async function loadWorkbookFromBuffer(
   input: ArrayBuffer | Uint8Array | Buffer,
-  opts: { defval?: unknown } & Partial<MatrixLimits> = {}
+  opts: { defval?: unknown; fileName?: string } & Partial<MatrixLimits> = {}
 ): Promise<LoadedWorkbook> {
   const defval = opts.defval ?? null;
+  const fileName = opts.fileName;
   const buf =
     input instanceof ArrayBuffer
       ? Buffer.from(new Uint8Array(input))
@@ -271,15 +539,34 @@ export async function loadWorkbookFromBuffer(
     const text = buf.toString("utf8");
     // Jika bukan teks yang masuk akal (biner tak dikenal), biarkan exceljs
     // yang menolak dengan pesan di bawah.
-    if (text.includes("\n") || text.includes(",") || text.includes(";") || text.includes("\t")) {
-      const matrix = parseCsvMatrix(text, defval);
+    if (text.includes("\n") || text.includes(",") || text.includes(";") || text.includes("\t") || text.includes("\r")) {
+      // Guard dini: file teks > 25MB hampir pasti salah format/korup.
+      if (buf.byteLength > 25 * 1024 * 1024) {
+        throw new MatrixLimitError(
+          "TOTAL_TOO_LARGE",
+          `${fileName ? `Berkas "${fileName}" · ` : ""}Ukuran teks ${(buf.byteLength / 1048576).toFixed(1)}MB melebihi 25MB. Jika ini file .xlsx yang ter-rename jadi .csv (atau sebaliknya), kembalikan ekstensinya lalu simpan ulang sebagai .xlsx.`,
+          { fileName, sheetName: "Sheet1", hint: "Pastikan ekstensi sesuai isi (CSV = teks, XLSX = biner ZIP). Simpan ulang sebagai .xlsx." }
+        );
+      }
+      const parsed = parseCsvMatrix(text, defval, {
+        maxCellChars: opts.maxCellChars,
+        maxTotalChars: opts.maxTotalChars,
+      });
+      const matrix = parsed.matrix;
       if (opts.maxRows !== undefined || opts.maxCols !== undefined) {
         validateMatrixLimits(matrix, {
           maxRows: opts.maxRows ?? Number.MAX_SAFE_INTEGER,
           maxCols: opts.maxCols ?? Number.MAX_SAFE_INTEGER,
           maxCellChars: opts.maxCellChars,
+          maxTotalChars: opts.maxTotalChars,
+          onOversizeCell: opts.onOversizeCell,
+          fileName,
+          sheetName: "Sheet1",
         });
       }
+      // Selipkan peringatan parser (kutip liar/delimiter) ke console agar
+      // bisa diaudit tanpa menggagalkan upload file yang masih bisa dibaca.
+      for (const w of parsed.warnings) console.warn(`[csv] ${fileName ?? ""}: ${w}`);
       return {
         sheetNames: ["Sheet1"],
         matrices: new Map([["Sheet1", matrix]]),
@@ -293,7 +580,7 @@ export async function loadWorkbookFromBuffer(
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
   } catch {
     throw new Error(
-      "Gagal membaca berkas Excel. Parser baru hanya mendukung .xlsx/.xlsm (dan .csv). Untuk .xls/.xlsb, simpan ulang sebagai .xlsx lalu unggah kembali."
+      `${fileName ? `Berkas "${fileName}" · ` : ""}Gagal membaca berkas Excel. Parser hanya mendukung .xlsx/.xlsm (dan .csv). Untuk .xls/.xlsb, simpan ulang sebagai .xlsx lalu unggah kembali.`
     );
   }
   const sheetNames = wb.worksheets.map((ws) => ws.name);
