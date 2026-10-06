@@ -20,6 +20,7 @@ import { getSession } from "@/lib/session";
 import {
   canonicalFeeSearch,
   classifyFeeDbError,
+  exactPpidCandidates,
   normalizePpid,
   ppidFuzzyPattern,
   ppidSearchKey,
@@ -69,13 +70,16 @@ export async function GET(req: Request) {
     const admin = getSupabaseAdmin();
 
     // 1) Cocok persis PPID ternormalisasi (jalur cepat + akurat).
-    if (exactPpid !== "") {
+    // Kedua varian hyphen (dengan/tanpa "-") via .in() agar tak bergantung
+    // posisi dalam recall fuzzy + jendela limit.
+    const exactCandidates = exactPpidCandidates(rawQ);
+    if (exactCandidates.length > 0) {
       let query = admin
         .from("loket_profiles")
         .select(
           PROFIL_COLUMNS
         )
-        .eq("ppid", exactPpid);
+        .in("ppid", exactCandidates);
       if (periode !== "") query = query.eq("periode", periode);
       const { data, error } = await query
         .order("periode", { ascending: false })

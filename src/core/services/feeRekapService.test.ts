@@ -46,6 +46,8 @@ import {
   MOCK_FEE_DATA,
   canonicalFeeSearch,
   escapeFeeLike,
+  exactPpidCandidates,
+  mergeExactFirst,
   normalizeHeaderCell,
   normalizePpid,
   paginateRows,
@@ -1024,7 +1026,69 @@ describe("saveFeeImport chunked", () => {
       periode: "2026-09",
     });
     expect(result.upserted).toBe(2);
+    expect(result.skipped).toBe(0);
     expect(calls).toHaveLength(1);
+  });
+
+  it("skipped server (PPID kosong) diakumulasi per chunk", async () => {
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        n += 1;
+        return {
+          ok: true,
+          json: async () => ({ upserted: 500, periode: "2026-09", skipped: n }),
+        };
+      })
+    );
+    const result = await saveFeeImport(
+      { rows: makeRows(1000), fileName: "skip.xlsx", periode: "2026-09" },
+      undefined
+    );
+    expect(result.upserted).toBe(1000);
+    expect(result.skipped).toBe(3);
+  });
+
+  it("invariant chunk: upserted + failedCount wajib sama dengan received", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          upserted: 2,
+          periode: "2026-09",
+          received: 2,
+          failedCount: 0,
+          skipped: 0,
+        }),
+      }))
+    );
+    const ok = await saveFeeImport({
+      rows: makeRows(2),
+      fileName: "akuntabel.xlsx",
+      periode: "2026-09",
+    });
+    expect(ok.upserted).toBe(2);
+  });
+
+  it("invariant chunk: selisih akuntansi melempar keras (anti silent failure)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          upserted: 1,
+          periode: "2026-09",
+          received: 2,
+          failedCount: 0,
+          skipped: 0,
+        }),
+      }))
+    );
+    await expect(
+      saveFeeImport({ rows: makeRows(2), fileName: "hilang.xlsx", periode: "2026-09" })
+    ).rejects.toThrow(/tidak akuntabel/);
   });
 
   it("gagal di tengah jalan menyertakan posisi batch", async () => {
@@ -2035,8 +2099,35 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
   it("ppidSearchKey: hubung/spasi/NBSP/case diabaikan saat mencari", () => {
     expect(ppidSearchKey("sbpos-ckm-001")).toBe("SBPOSCKM001");
     expect(ppidSearchKey("sbpos ckm 001")).toBe("SBPOSCKM001");
-    expect(ppidSearchKey(" SBPOS-CKM-001 ")).toBe("SBPOSCKM001");
+    expect(ppidSearchKey(" SBPOS-CKM-001 ")).toBe("SBPOSCKM001");
     expect(filterFeeRows(MOCK_FEE_DATA, "sbposckm001", "")).toHaveLength(1);
+  });
+  it("exactPpidCandidates: kanonis + tanpa-hubung, dedup, kosong aman", () => {
+    expect(exactPpidCandidates("53jcum03001crbsc")).toEqual(["53JCUM03001CRBSC"]);
+    expect(exactPpidCandidates("SBPOS-CKM-001")).toEqual(["SBPOS-CKM-001", "SBPOSCKM001"]);
+    expect(exactPpidCandidates("SBPOSCKM001")).toEqual(["SBPOSCKM001"]);
+    expect(exactPpidCandidates("")).toEqual([]);
+    expect(exactPpidCandidates("   ")).toEqual([]);
+  });
+  it("mergeExactFirst: exact selalu di depan, dedup, potong pageSize", () => {
+    const idOf = (r: { id: string }) => r.id;
+    const exact = [{ id: "b" }, { id: "a" }];
+    const recall = [{ id: "a" }, { id: "c" }, { id: "d" }];
+    expect(mergeExactFirst(exact, recall, 10, idOf).map((r) => r.id)).toEqual([
+      "b",
+      "a",
+      "c",
+      "d",
+    ]);
+    expect(mergeExactFirst(exact, recall, 2, idOf).map((r) => r.id)).toEqual([
+      "b",
+      "a",
+    ]);
+    expect(mergeExactFirst([], recall, 10, idOf).map((r) => r.id)).toEqual([
+      "a",
+      "c",
+      "d",
+    ]);
   });
 });
 

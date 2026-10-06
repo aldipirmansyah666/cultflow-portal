@@ -503,6 +503,9 @@ export default function FeeRekapPage() {
   const [modalError, setModalError] = useState<string | null>(null);
   // Ekspor slip modal sebagai gambar (html-to-image, client-side).
   const modalSlipRef = useRef<HTMLDivElement>(null);
+  // Area slip kartu hasil pencarian (di bawah header kartu) — dirender ke
+  // PNG / disalin sebagai gambar dengan helper yang SAMA dengan modal.
+  const cardSlipRef = useRef<HTMLDivElement>(null);
   const [imgBusy, setImgBusy] = useState<"png" | "copy" | null>(null);
   const [imgError, setImgError] = useState<string | null>(null);
   const [bulan, setBulan] = useState(9);
@@ -695,24 +698,80 @@ export default function FeeRekapPage() {
   /**
    * Fee milik agen pada slip — strict match langsung dari data fee
    * (String(ppid).trim().toUpperCase() via getSelectedLoketData()).
-   * Tidak ada ketergantungan master: query dicocokkan ke dataset fee.
+   * Tidak ada ketergantungan master: query dicocokkan ke dataset fee,
+   * atau ke hasil pencarian server bila dataset lokal (1000 baris) miss.
    */
-  const agentFees = useMemo(() => {
-    if (committedQuery.trim() === "") return [];
-    return getSelectedLoketData(dataset, committedQuery, periode);
-  }, [dataset, committedQuery, periode]);
-
-  /**
-   * Profil virtual 100% dari data fee: PPID ada di fee = terdaftar.
-   * Tidak pernah memicu status master "Belum terdaftar sebagai AgenPos".
-   */
-  const agentProfile: FeeAgentProfile | null = useMemo(() => {
+  const localProfile = useMemo(() => {
     if (committedQuery.trim() === "") return null;
     return buildFeeAgentProfile(
       getSelectedLoketData(dataset, committedQuery, "SEMUA"),
       periode
     );
   }, [dataset, committedQuery, periode]);
+
+  // Fallback server: dataset lokal dibatasi 1000 baris pertama sehingga
+  // PPID yang tersimpan BISA tidak ada di memori ("tidak ditemukan"
+  // palsu). Bila lokal miss, tanyakan server (filter q di DB) sekali saja
+  // per query ter-commit.
+  const [serverSearch, setServerSearch] = useState<{
+    q: string;
+    rows: FeeRekapRow[];
+  } | null>(null);
+  const [serverSearching, setServerSearching] = useState(false);
+
+  useEffect(() => {
+    const q = committedQuery.trim();
+    if (q === "" || listLoading || localProfile) return;
+    let cancelled = false;
+    setServerSearching(true);
+    (async () => {
+      try {
+        const res = await fetchFeeList({ q, pageSize: 100 });
+        if (!cancelled) setServerSearch({ q, rows: res.data });
+      } catch {
+        if (!cancelled) setServerSearch({ q, rows: [] });
+      } finally {
+        if (!cancelled) setServerSearching(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [committedQuery, listLoading, localProfile]);
+
+  const serverRowsForQuery =
+    serverSearch && serverSearch.q === committedQuery.trim()
+      ? serverSearch.rows
+      : null;
+
+  const agentProfile: FeeAgentProfile | null =
+    localProfile ??
+    (serverRowsForQuery
+      ? buildFeeAgentProfile(
+          getSelectedLoketData(serverRowsForQuery, committedQuery, "SEMUA"),
+          periode
+        )
+      : null);
+  const profileFromServer = localProfile === null && agentProfile !== null;
+
+  const agentFees = useMemo(() => {
+    if (committedQuery.trim() === "") return [];
+    const pool = localProfile ? dataset : (serverRowsForQuery ?? []);
+    return getSelectedLoketData(pool, committedQuery, periode);
+  }, [dataset, committedQuery, periode, localProfile, serverRowsForQuery]);
+
+  // Identitas file untuk nama PNG slip kartu hasil pencarian: profil
+  // Master bila ada, jika tidak profil virtual (pakai periode filter
+  // aktif atau periode terbaru).
+  const cardSlipFile: { ppid: string; periode: string } | null = lookupProfile
+    ? { ppid: lookupProfile.ppid, periode: lookupProfile.periode }
+    : agentProfile
+      ? {
+          ppid: agentProfile.ppid,
+          periode:
+            periode !== "SEMUA" ? periode : (agentProfile.periods[0] ?? ""),
+        }
+      : null;
 
   /**
    * Modal selalu me-resolve ulang dari dataset segar (anti snapshot basi
@@ -789,14 +848,17 @@ export default function FeeRekapPage() {
   }
 
   /**
-   * Unduh slip modal sebagai PNG tajam (pixelRatio 2, latar putih).
+   * Unduh slip sebagai PNG tajam (pixelRatio 2, latar putih).
    * html-to-image diimpor dinamis agar tidak membebani bundle awal.
-   * Gagal render (mis. fungsi warna CSS tak didukung browser) dilaporkan
-   * sebagai pesan ramah, bukan crash.
+   * Dipakai modal Detail DAN kartu hasil pencarian (node + profil
+   * diteruskan pemanggil). Gagal render dilaporkan sebagai pesan ramah,
+   * bukan crash.
    */
-  async function downloadSlipPng() {
-    const node = modalSlipRef.current;
-    if (!node || !modalProfile || imgBusy) return;
+  async function downloadSlipNodePng(
+    node: HTMLElement | null,
+    file: { ppid: string; periode: string } | null
+  ) {
+    if (!node || !file || imgBusy) return;
     setImgBusy("png");
     setImgError(null);
     try {
@@ -808,7 +870,7 @@ export default function FeeRekapPage() {
       });
       const a = document.createElement("a");
       a.href = dataUrl;
-      a.download = slipImageFilename(modalProfile.ppid, modalProfile.periode);
+      a.download = slipImageFilename(file.ppid, file.periode);
       a.click();
       setToast("Slip tersimpan sebagai PNG.");
     } catch (err) {
@@ -822,17 +884,21 @@ export default function FeeRekapPage() {
     }
   }
 
+  async function downloadSlipPng() {
+    await downloadSlipNodePng(modalSlipRef.current, modalProfile);
+  }
+
   /**
-   * Salin slip modal sebagai GAMBAR ke clipboard (image/png).
+   * Salin slip sebagai GAMBAR ke clipboard (image/png).
    * Butuh ClipboardItem + izin clipboard (Chrome/Edge modern).
-   * Seluruh baris rincian (79 modul) dibentangkan dulu dari scroll
+   * Dipakai modal Detail DAN kartu hasil pencarian (node diteruskan
+   * pemanggil). Seluruh baris rincian dibentangkan dulu dari scroll
    * 480px ke tinggi penuh agar hasil render mencakup semuanya dari
    * atas sampai bawah — lalu dikembalikan di `finally` sehingga
    * tampilan layar tidak berubah. Murni clipboard, tanpa file disk.
    */
-  async function copySlipImage() {
-    const node = modalSlipRef.current;
-    if (!node || !modalProfile || imgBusy) return;
+  async function copySlipNodeImage(node: HTMLElement | null) {
+    if (!node || imgBusy) return;
     if (
       typeof window.ClipboardItem === "undefined" ||
       !navigator.clipboard?.write
@@ -891,6 +957,10 @@ export default function FeeRekapPage() {
       }
       setImgBusy(null);
     }
+  }
+
+  async function copySlipImage() {
+    await copySlipNodeImage(modalSlipRef.current);
   }
 
   function downloadCsv() {
@@ -1453,8 +1523,24 @@ export default function FeeRekapPage() {
           (result.profilesUpserted > 0
             ? ` (${result.profilesUpserted} profil + ${result.detailsUpserted} rincian modul Master)`
             : "") +
-          (result.zeroRows > 0 ? ` (${result.zeroRows} baris bernilai Rp 0).` : ".")
+          (result.zeroRows > 0 ? ` (${result.zeroRows} baris bernilai Rp 0).` : ".") +
+          (result.skipped > 0
+            ? ` ${result.skipped} baris dilewati server (PPID kosong/tak valid) — periksa baris tersebut di file sumber.`
+            : "")
       );
+      // Batch terisolasi: masalah batch dicatat server walau tiap baris
+      // akhirnya pulih via fallback per-baris. Tampilkan ringkas di UI +
+      // detail penuh di konsol agar kegagalan tak pernah sunyi.
+      if (result.batchErrors.length > 0) {
+        console.error(
+          `[fee-rekap] ${result.batchErrors.length} batch terisolasi saat simpan ${fileMeta?.name ?? ""}:`,
+          result.batchErrors
+        );
+        setSaveResult(
+          (prev) =>
+            `${prev ?? ""} (+${result.batchErrors.length} batch sempat gagal lalu dipulihkan per baris — detail di konsol browser).`
+        );
+      }
       setToast("Rekap fee tersimpan — tabel monitoring diperbarui.");
       setPreview([]);
       setFileMeta(null);
@@ -1744,7 +1830,14 @@ export default function FeeRekapPage() {
           </section>
 
           {/* Kartu profil + fee — 100% dari data fee (tanpa master) */}
-          {hasQuery && !listLoading && !listError && !agentProfile && (
+          {hasQuery && !listLoading && !listError && !agentProfile && serverSearching && (
+            <div className="flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white py-8 text-center">
+              <p className="text-xs font-semibold text-slate-500">
+                Tidak ada di 1000 baris awal — mencari di database…
+              </p>
+            </div>
+          )}
+          {hasQuery && !listLoading && !listError && !agentProfile && !serverSearching && (
             <div className="flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white py-12 text-center">
               <SearchX className="mb-3 size-8 text-slate-300" aria-hidden />
               <p className="text-sm font-semibold text-slate-900">PPID tidak ditemukan di data fee</p>
@@ -1765,6 +1858,11 @@ export default function FeeRekapPage() {
                   <span className="font-mono text-base font-extrabold tracking-wide text-slate-900 uppercase">
                     {committedQuery === "" ? "—" : committedQuery}
                   </span>
+                  {profileFromServer && (
+                    <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                      Ditemukan di database (di luar 1000 baris awal)
+                    </span>
+                  )}
                 </p>
                 <span className="ml-auto flex gap-2 print:hidden">
                   <button
@@ -1786,6 +1884,34 @@ export default function FeeRekapPage() {
                   </button>
                   <button
                     type="button"
+                    onClick={() => void downloadSlipNodePng(cardSlipRef.current, cardSlipFile)}
+                    disabled={imgBusy !== null}
+                    title="Unduh slip sebagai gambar PNG"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-emerald-500 disabled:opacity-60"
+                  >
+                    {imgBusy === "png" ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <Download className="size-3.5" aria-hidden />
+                    )}
+                    {imgBusy === "png" ? "Merender…" : "Download PNG"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void copySlipNodeImage(cardSlipRef.current)}
+                    disabled={imgBusy !== null}
+                    title="Salin slip sebagai gambar ke clipboard"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
+                  >
+                    {imgBusy === "copy" ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : (
+                      <ImageIcon className="size-3.5" aria-hidden />
+                    )}
+                    {imgBusy === "copy" ? "Menyalin…" : "Salin Gambar"}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => window.print()}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
                   >
@@ -1794,6 +1920,12 @@ export default function FeeRekapPage() {
                   </button>
                 </span>
               </div>
+              {imgError && (
+                <p role="alert" className="border-b border-red-200 bg-red-50 px-4 py-2 text-xs font-medium text-red-700 sm:px-6">
+                  {imgError}
+                </p>
+              )}
+              <div ref={cardSlipRef} className="bg-white">
               <div aria-hidden className="border-t border-dashed border-slate-400" />
               {lookupLoading ? (
                 <p role="status" className="flex items-center gap-2 px-4 py-4 text-sm text-slate-500 sm:px-6">
@@ -1885,6 +2017,7 @@ export default function FeeRekapPage() {
               <p className="px-4 py-2.5 font-mono text-[11px] text-slate-400 sm:px-6">
                 Sumber: {lookupProfile ? "loket_profiles + rincian modul (Excel Master)" : "fee_loket (data Excel)"} · CultFlow Workspace
               </p>
+              </div>
             </section>
           )}
 

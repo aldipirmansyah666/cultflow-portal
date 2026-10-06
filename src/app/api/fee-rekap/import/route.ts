@@ -272,12 +272,16 @@ export async function POST(req: Request) {
       periode: declaredPeriode,
       chunkIndex,
       chunkTotal,
+      // Akuntansi chunk: received = baris valid ter-dedup yang diproses
+      // chunk ini. Klien menegaskan upserted + failedCount === received;
+      // selisih berarti ada baris hilang diam-diam (silent failure).
+      received: deduped.length,
+      skipped,
       // Gema audit nilai: klien membandingkan receivedSum vs storedSum
       // untuk mendeteksi mapping-loss (preview bernominal tapi DB 0).
       receivedSum,
       storedSum,
       zeroRows,
-      skipped,
       // Isolasi batch: masalah per batch + PPID yang gagal total agar
       // klien dapat melanjutkan/menandai tanpa menebak.
       batchErrors: issues,

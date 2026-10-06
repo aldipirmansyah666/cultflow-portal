@@ -421,11 +421,55 @@ export function ppidSearchKey(value: unknown): string {
 }
 
 /**
+ * Kandidat kecocokan PERSIS untuk query PPID: bentuk kanonis
+ * (`normalizePpid`: UPPER + tanpa spasi) dan bentuk tanpa hubung
+ * (`ppidSearchKey`). Dipakai `.in("ppid", ...)` agar baris yang persis
+ * selalu terambil sebelum jendela `range()` memotongnya — pola fuzzy
+ * `%c1%c2%...%` melebarkan recall ke ribuan baris sehingga baris persis
+ * bisa terkubur di luar halaman bila hanya mengandalkan query `or`.
+ */
+export function exactPpidCandidates(rawQ: unknown): string[] {
+  const text = rawQ === null || rawQ === undefined ? "" : String(rawQ);
+  const out: string[] = [];
+  for (const c of [normalizePpid(text), ppidSearchKey(text)]) {
+    if (c !== "" && !out.includes(c)) out.push(c);
+  }
+  return out;
+}
+
+/**
+ * Gabung baris exact-first + baris recall `or`, dedup berdasarkan identitas,
+ * potong sepanjang halaman. Baris persis selalu di depan walau pola fuzzy
+ * me-recall ribuan kandidat (seluruh 10rb+ data tetap tercakup karena
+ * seleksi presisi tidak lagi bergantung posisi dalam `range()`).
+ */
+export function mergeExactFirst<T>(
+  exactRows: T[],
+  recallRows: T[],
+  pageSize: number,
+  idOf: (row: T) => string
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of [...exactRows, ...recallRows]) {
+    const id = idOf(row);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(row);
+    if (out.length >= Math.max(1, pageSize)) break;
+  }
+  return out;
+}
+
+/**
  * Pola LIKE hyphen-insensitive untuk kolom PPID (`%S%B%P%...%`):
  * menemukan baris apa pun penempatan "-" di sisi query maupun DB
  * (ilike persis gagal bila salah satu sisi berhubung). Dipakai dengan
  * `ilike` (bukan `like`) agar case-insensitive. Null bila query kosong.
  * Recall sengaja luas; presisi dipilih di JS via ppidSearchKey equality.
+ * PERHATIAN: karena recall luas, JANGAN andalkan posisi baris persis di
+ * dalamnya — selalu gabungkan via `mergeExactFirst` (lihat
+ * `exactPpidCandidates`).
  */
 export function ppidFuzzyPattern(rawQ: unknown): string | null {
   const text = rawQ === null || rawQ === undefined ? "" : String(rawQ);
@@ -2058,6 +2102,8 @@ export interface SaveFeeImportResult {
   batchErrors: BatchIssue[];
   /** PPID yang gagal total di server (melempar bila tak-kosong). */
   failedPpids: string[];
+  /** Baris dilewati server per chunk (PPID kosong/tak valid, bukan error). */
+  skipped: number;
 }
 
 export interface SaveFeeProgress {
@@ -2138,6 +2184,7 @@ export async function saveFeeImport(
   let zeroRows = 0;
   let profilesUpserted = 0;
   let detailsUpserted = 0;
+  let skipped = 0;
   const batchErrors: BatchIssue[] = [];
   const failedPpids: string[] = [];
   for (let i = 0; i < chunks.length; i += 1) {
@@ -2196,6 +2243,10 @@ export async function saveFeeImport(
         zeroRows?: unknown;
         profilesUpserted?: unknown;
         detailsUpserted?: unknown;
+        skipped?: unknown;
+        /** Baris valid ter-dedup yang diproses chunk ini (untuk invariant). */
+        received?: unknown;
+        failedCount?: unknown;
         batchErrors?: unknown;
         failedPpids?: unknown;
       };
@@ -2208,6 +2259,32 @@ export async function saveFeeImport(
       profilesUpserted += typeof pu === "number" && Number.isFinite(pu) ? Math.max(0, Math.floor(pu)) : 0;
       const du = body.detailsUpserted;
       detailsUpserted += typeof du === "number" && Number.isFinite(du) ? Math.max(0, Math.floor(du)) : 0;
+      const sk = body.skipped;
+      const skippedThisChunk =
+        typeof sk === "number" && Number.isFinite(sk) ? Math.max(0, Math.floor(sk)) : 0;
+      skipped += skippedThisChunk;
+      const received =
+        typeof body.received === "number" && Number.isFinite(body.received)
+          ? Math.max(0, Math.floor(body.received))
+          : null;
+      const failedThisChunk =
+        typeof body.failedCount === "number" && Number.isFinite(body.failedCount)
+          ? Math.max(0, Math.floor(body.failedCount))
+          : 0;
+      // Invariant akuntansi per chunk: setiap baris valid yang diproses
+      // server HARUS berakhir tersimpan atau tercatat gagal. Selisih =
+      // baris hilang diam-diam -> gagalkan chunk dengan pesan keras,
+      // JANGAN anggap sukses.
+      if (
+        received !== null &&
+        (body.upserted ?? 0) + failedThisChunk !== received
+      ) {
+        throw new Error(
+          `Chunk ${i + 1}/${chunks.length} tidak akuntabel: server memproses ${received} baris, ` +
+            `tetapi ${body.upserted ?? 0} tersimpan + ${failedThisChunk} gagal. ` +
+            `${received - (body.upserted ?? 0) - failedThisChunk} baris hilang tanpa jejak — simpan ulang chunk ini (idempoten).`
+        );
+      }
       if (Array.isArray(body.batchErrors)) {
         for (const b of body.batchErrors) {
           if (
@@ -2236,7 +2313,7 @@ export async function saveFeeImport(
         `${upserted} baris lain tetap tersimpan — perbaiki baris tersebut dan simpan ulang (idempoten).`
     );
   }
-  return { upserted, periode: input.periode, receivedSum, storedSum, zeroRows, profilesUpserted, detailsUpserted, batchErrors, failedPpids };
+  return { upserted, periode: input.periode, receivedSum, storedSum, zeroRows, profilesUpserted, detailsUpserted, batchErrors, failedPpids, skipped };
 }
 
 export interface VerifyFeeImportResult {

@@ -17,7 +17,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   canonicalFeeSearch,
   classifyFeeDbError,
+  exactPpidCandidates,
   isPaidStatus,
+  mergeExactFirst,
   normalizeDeleteIds,
   parseAmount,
   ppidFuzzyPattern,
@@ -277,6 +279,29 @@ interface ProfilListResult {
   summary: { totalLoket: number; totalTerbayarAktif: number; latestPeriode: string };
 }
 
+/**
+ * Ambil baris yang cocok PERSIS (kedua varian hyphen) sebelum query recall.
+ * Menjamin PPID yang dicari selalu terambil walau pola fuzzy me-recall
+ * ribuan baris di luar jendela `range()` (seluruh 10rb+ data tercakup).
+ */
+async function fetchExactPpidRows(
+  admin: SupabaseClient,
+  table: string,
+  columns: string,
+  rawQ: string,
+  periode: string
+): Promise<unknown[]> {
+  const candidates = exactPpidCandidates(rawQ);
+  if (candidates.length === 0) return [];
+  let query = admin.from(table).select(columns).in("ppid", candidates);
+  if (periode !== "" && periode !== "SEMUA") {
+    query = query.eq("periode", periode);
+  }
+  const { data, error } = await query.limit(20);
+  if (error) throw error;
+  return (data ?? []) as unknown[];
+}
+
 /** Bangun kondisi OR pencarian (persis + substring + fuzzy hyphen). */
 function profilOrs(qPpid: string, qNama: string, rawQ: string): string[] {
   const ors: string[] = [];
@@ -321,7 +346,17 @@ async function queryProfiles(
   if (error) throw error;
   const total = Math.max(0, count ?? 0);
   if (total === 0) return null;
-  const rows = data ?? [];
+  // Exact-first: baris yang cocok persis didahulukan agar tak terkubur
+  // pola fuzzy di luar jendela range (khusus pencarian ber-q).
+  const recallRows = (data ?? []) as unknown[];
+  const exactRows =
+    q.rawQ.trim() === ""
+      ? []
+      : await fetchExactPpidRows(admin, "loket_profiles", PROFIL_COLUMNS, q.rawQ, q.periode);
+  const rows = mergeExactFirst(exactRows, recallRows, q.pageSize, (r) => {
+    const o = r as { id?: unknown; ppid?: unknown; periode?: unknown };
+    return String(o.id ?? `${o.ppid}||${o.periode}`);
+  });
   // Ringkasan SELALU lengkap: agregasi SQL via RPC dulu (1 round-trip),
   // fallback paginasi penuh bila fungsi belum dimigrasi. Tidak ada lagi
   // full-table scan PostgREST di setiap request bila RPC tersedia.
@@ -440,7 +475,23 @@ async function queryLegacy(
     .range(from, from + q.pageSize - 1);
   if (error) throw error;
 
-  const rows = (data ?? []).map(toFeeRekapRow);
+  // Exact-first seperti jalur Master: cocok persis selalu di depan.
+  const recallRows = (data ?? []) as unknown[];
+  const exactFull =
+    q.rawQ.trim() === ""
+      ? []
+      : await fetchExactPpidRows(
+          admin,
+          "fee_loket",
+          "id,ppid,nama_loket,periode,total_fee,status,rincian,updated_at",
+          q.rawQ,
+          q.periode
+        );
+  const mergedUnknown = mergeExactFirst(exactFull, recallRows, q.pageSize, (r) => {
+    const o = r as { id?: unknown; ppid?: unknown; periode?: unknown };
+    return String(o.id ?? `${o.ppid}||${o.periode}`);
+  });
+  const rows = (mergedUnknown as never[]).map(toFeeRekapRow);
   const total = Math.max(0, count ?? 0);
 
   // Ringkasan SELALU lengkap: agregasi SQL via RPC dulu, fallback
