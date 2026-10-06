@@ -5,10 +5,11 @@
  *   1. `loket_transaction_details` (rincihan modul — dihapus dulu karena
  *      secara logis bergantung pada profil),
  *   2. `loket_profiles` (identitas + ringkasan Master),
- *   3. `fee_loket` (cermin legacy agar tidak ada sisa yatim).
- * Riwayat `fee_upload_logs` DIPERTAHANKAN sebagai jejak audit.
+ *   3. `fee_loket` (cermin legacy agar tidak ada sisa yatim),
+ *   4. `fee_upload_logs` (riwayat upload ikut dibersihkan agar log kembali
+ *      bersih total seiring kosongnya data).
  *
- * Mengembalikan { success, deleted: { details, profiles, feeLoket } }.
+ * Mengembalikan { success, deleted: { details, profiles, feeLoket, uploadLogs } }.
  * Konfirmasi "Are you sure?" ditangani di UI (dialog) — endpoint ini
  * tidak bisa dipanggil tanpa sesi ADMIN.
  */
@@ -52,13 +53,15 @@ export async function DELETE() {
   }
   try {
     const admin = getSupabaseAdmin();
-    // Urutan: details → profiles → legacy (anak dulu, lalu induk).
+    // Urutan: details → profiles → legacy (anak dulu, lalu induk),
+    // terakhir riwayat upload agar log bersih total.
     const details = await deleteAll(admin, "loket_transaction_details");
     const profiles = await deleteAll(admin, "loket_profiles");
     const feeLoket = await deleteAll(admin, "fee_loket");
+    const uploadLogs = await deleteAll(admin, "fee_upload_logs");
     return NextResponse.json({
       success: true,
-      deleted: { details, profiles, feeLoket },
+      deleted: { details, profiles, feeLoket, uploadLogs },
     });
   } catch (e) {
     const classified = classifyFeeDbError(

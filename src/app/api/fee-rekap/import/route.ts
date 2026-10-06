@@ -243,6 +243,79 @@ export async function POST(req: Request) {
       issues,
     });
     const detailsUpserted = detRes.succeeded;
+    // Prune rincian yatim: upsert tak menghapus modul yang HILANG dari
+    // file baru (mis. re-upload tinggal 70 dari 79 modul) sehingga rincian
+    // basi menumpuk/duplikat secara logis di lookup. Untuk tiap
+    // (ppid,periode) chunk ini, hapus modul_nama yang tidak ada di payload
+    // chunk ini. Idempoten & aman di-retry: chunk pemilik modul akan
+    // me-re-upsert-nya saat gilirannya; chunk yang sama diulang pun
+    // menghasilkan himpunan akhir yang sama. Non-fatal (masuk issues) agar
+    // pembersihan tak menggagalkan penyimpanan utama.
+    if (details.length > 0) {
+      try {
+        const keepByPpid = new Map<string, Set<string>>();
+        for (const d of details) {
+          const key = `${d.ppid}||${d.periode}`;
+          let set = keepByPpid.get(key);
+          if (!set) {
+            set = new Set<string>();
+            keepByPpid.set(key, set);
+          }
+          set.add(d.modul_nama);
+        }
+        const ppids = [...keepByPpid.keys()].map((k) => k.split("||")[0] as string);
+        const existing = new Map<string, Set<string>>();
+        for (let i = 0; i < ppids.length; i += 500) {
+          const { data, error } = await admin
+            .from("loket_transaction_details")
+            .select("ppid,modul_nama")
+            .eq("periode", declaredPeriode)
+            .in("ppid", ppids.slice(i, i + 500));
+          if (error) throw error;
+          for (const r of (data ?? []) as { ppid: unknown; modul_nama: unknown }[]) {
+            const ppid = String(r.ppid ?? "");
+            const mod = String(r.modul_nama ?? "");
+            if (ppid === "" || mod === "") continue;
+            let set = existing.get(`${ppid}||${declaredPeriode}`);
+            if (!set) {
+              set = new Set<string>();
+              existing.set(`${ppid}||${declaredPeriode}`, set);
+            }
+            set.add(mod);
+          }
+        }
+        let pruned = 0;
+        for (const [key, keep] of keepByPpid) {
+          const have = existing.get(key);
+          if (!have) continue;
+          const [ppid] = key.split("||");
+          for (const mod of have) {
+            if (keep.has(mod)) continue;
+            const { error } = await admin
+              .from("loket_transaction_details")
+              .delete()
+              .eq("ppid", ppid as string)
+              .eq("periode", declaredPeriode)
+              .eq("modul_nama", mod);
+            if (error) throw error;
+            pruned += 1;
+          }
+        }
+        if (pruned > 0) {
+          issues.push({
+            batch: 0,
+            table: "loket_transaction_details",
+            message: `${pruned} rincian modul yatim dibersihkan (tidak ada di file baru).`,
+          });
+        }
+      } catch (e) {
+        issues.push({
+          batch: 0,
+          table: "loket_transaction_details",
+          message: `Pembersihan rincian yatim dilewati: ${e instanceof Error ? e.message : "gagal"}. Data utama tetap tersimpan.`,
+        });
+      }
+    }
     // PPID yang benar-benar hilang dari fee_loket (urutan pertama =
     // tabel kebenaran utama; rincian details menyusul per PPID::modul).
     const failedPpids = feeRes.failedIds.slice(0, 100);

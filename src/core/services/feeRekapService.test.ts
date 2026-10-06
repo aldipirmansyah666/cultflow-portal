@@ -3,6 +3,7 @@ import {
   buildCariSlipText,
   buildFeeAgentProfile,
   buildFeeCsv,
+  buildPeriode,
   buildFullModuleBreakdown,
   buildModuleBreakdown,
   buildRincianText,
@@ -26,6 +27,7 @@ import {
   isNontrivialFullParse,
   isPpidLike,
   isProfilDbRow,
+  isValidPeriode,
   normalizeImportProfil,
   normalizeLoketStatusInput,
   parseCariSheet,
@@ -75,6 +77,23 @@ describe("feeRekapService", () => {
   it("formatRupiah memakai format IDR", () => {
     expect(formatRupiah(1_250_000)).toBe("Rp 1.250.000");
     expect(formatPeriode("2026-09")).toBe("September 2026");
+  });
+
+  it("periode termin: build/format/regex T1-T3, tolak T0/T4", () => {
+    expect(buildPeriode(9, 2026)).toBe("2026-09");
+    expect(buildPeriode(9, 2026, 0)).toBe("2026-09");
+    expect(buildPeriode(9, 2026, 1)).toBe("2026-09-T1");
+    expect(buildPeriode(9, 2026, 3)).toBe("2026-09-T3");
+    expect(buildPeriode(9, 2026, 4)).toBe("2026-09");
+    expect(formatPeriode("2026-09-T1")).toBe("September 2026 - T1");
+    expect(formatPeriode("2026-09-T3")).toBe("September 2026 - T3");
+    expect(formatPeriode("2026-09")).toBe("September 2026");
+    expect(isValidPeriode("2026-09")).toBe(true);
+    expect(isValidPeriode("2026-09-T2")).toBe(true);
+    expect(isValidPeriode("2026-09-T0")).toBe(false);
+    expect(isValidPeriode("2026-09-T4")).toBe(false);
+    expect(isValidPeriode("2026-13")).toBe(false);
+    expect(isValidPeriode("")).toBe(false);
   });
 
   it("filter realtime by PPID/nama + periode", () => {
@@ -2300,13 +2319,13 @@ describe("dropAllFeeData (reset database)", () => {
           ok: true,
           json: async () => ({
             success: true,
-            deleted: { details: 13501, profiles: 10692, feeLoket: 10692 },
+            deleted: { details: 13501, profiles: 10692, feeLoket: 10692, uploadLogs: 7 },
           }),
         };
       })
     );
     const result = await dropAllFeeData();
-    expect(result).toEqual({ profiles: 10692, details: 13501, feeLoket: 10692 });
+    expect(result).toEqual({ profiles: 10692, details: 13501, feeLoket: 10692, uploadLogs: 7 });
     expect(seen).toHaveLength(1);
     expect(seen[0]?.url).toBe("/api/fee-rekap/drop-all");
     expect((seen[0]?.init as { method: string }).method).toBe("DELETE");

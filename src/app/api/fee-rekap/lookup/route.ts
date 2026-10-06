@@ -21,6 +21,7 @@ import {
   canonicalFeeSearch,
   classifyFeeDbError,
   exactPpidCandidates,
+  isValidPeriode,
   normalizePpid,
   ppidFuzzyPattern,
   ppidSearchKey,
@@ -38,7 +39,7 @@ const PROFIL_COLUMNS =
   "ppid,nama_loket,bank,no_rekening,nama_pemilik,rekomender,elektrik_area,periode,fee_bulan_ini,fee_bulan_sebelumnya,subsidi_antar_loket,total_fee,minus,hold,potongan_lainnya,potongan_ongkir,total_fee_transfer,fee_ke_deposit,fee_transfer_rekening,sisa_fee,keterangan,tanggal_transfer,fee_siap_transfer,status_pembayaran";
 
 function validPeriode(value: string): boolean {
-  return /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+  return isValidPeriode(value);
 }
 
 export async function GET(req: Request) {

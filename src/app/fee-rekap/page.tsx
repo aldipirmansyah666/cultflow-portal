@@ -510,6 +510,10 @@ export default function FeeRekapPage() {
   const [imgError, setImgError] = useState<string | null>(null);
   const [bulan, setBulan] = useState(9);
   const [tahun, setTahun] = useState(2026);
+  // Termin bulanan (0 = tanpa termin; 1-3 = T1/T2/T3). Termin menjadi
+  // bagian kunci periode ("2026-09-T1") sehingga upload termin baru tidak
+  // menimpa termin sebelumnya.
+  const [termin, setTermin] = useState(0);
   const [saving, setSaving] = useState(false);
   const [saveResult, setSaveResult] = useState<string | null>(null);
   const [saveProgress, setSaveProgress] = useState<{ done: number; total: number } | null>(null);
@@ -1126,7 +1130,7 @@ export default function FeeRekapPage() {
         );
       }
       const fileLabel = file.name.replace(/\.[^.]+$/, "");
-      const periodeAktif = buildPeriode(bulan, tahun);
+      const periodeAktif = buildPeriode(bulan, tahun, termin);
       // Gabung lintas sheet: PPID pertama menang (Master/BSB dulu).
       // Sheet terpecahkan (berkontribusi baris / form Cari tertangani)
       // tidak di-scan ulang; sisanya menjadi sasaran jaring universal.
@@ -1480,10 +1484,11 @@ export default function FeeRekapPage() {
   }
 
   /** Periode dropdown menimpa seluruh preview (ditentukan admin). */
-  function applyPeriode(nextBulan: number, nextTahun: number) {
+  function applyPeriode(nextBulan: number, nextTahun: number, nextTermin: number = termin) {
     setBulan(nextBulan);
     setTahun(nextTahun);
-    const p = buildPeriode(nextBulan, nextTahun);
+    setTermin(nextTermin);
+    const p = buildPeriode(nextBulan, nextTahun, nextTermin);
     // Profil Master ikut periode yang sama agar simpan/verifikasi/log
     // konsisten (server memakai periode deklarasi sebagai otoritatif).
     setPreview((prev) =>
@@ -1506,7 +1511,7 @@ export default function FeeRekapPage() {
         {
           rows: preview,
           fileName: fileMeta?.name ?? "rekap-fee.xlsx",
-          periode: buildPeriode(bulan, tahun),
+          periode: buildPeriode(bulan, tahun, termin),
         },
         (p) => setSaveProgress({ done: p.done, total: p.total })
       );
@@ -1636,7 +1641,7 @@ export default function FeeRekapPage() {
       setSelected(null);
       clearModalLookup();
       setToast(
-        `Seluruh data fee dihapus — ${result.profiles} profil, ${result.details} rincian, ${result.feeLoket} baris legacy. Siap re-import bersih.`
+        `Seluruh data fee dihapus — ${result.profiles} profil, ${result.details} rincian, ${result.feeLoket} baris legacy, ${result.uploadLogs} log upload. Siap re-import bersih.`
       );
       await loadAll();
     } catch (err) {
@@ -1647,7 +1652,7 @@ export default function FeeRekapPage() {
   }
 
   const isAdmin = role === "ADMIN";
-  const previewPeriode = preview[0]?.periode ?? buildPeriode(bulan, tahun);
+  const previewPeriode = preview[0]?.periode ?? buildPeriode(bulan, tahun, termin);
   const hasQuery = committedQuery.trim() !== "";
 
   return (
@@ -2515,6 +2520,23 @@ export default function FeeRekapPage() {
                         ))}
                       </select>
                     </label>
+                    <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-600">
+                      Termin
+                      <select
+                        value={termin}
+                        onChange={(e) =>
+                          applyPeriode(bulan, tahun, Number(e.target.value))
+                        }
+                        aria-label="Termin periode"
+                        title="T1/T2/T3 membuat periode unik (mis. September 2026 - T1) agar tidak menimpa termin lain"
+                        className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 focus:border-emerald-500 focus:outline-none"
+                      >
+                        <option value={0}>Tanpa Termin</option>
+                        <option value={1}>T1</option>
+                        <option value={2}>T2</option>
+                        <option value={3}>T3</option>
+                      </select>
+                    </label>
                     <button
                       type="button"
                       onClick={() => void handleSave()}
@@ -2813,13 +2835,17 @@ export default function FeeRekapPage() {
               ,{" "}
               <span className="font-mono font-bold text-slate-700">
                 loket_transaction_details
+              </span>
+              ,{" "}
+              <span className="font-mono font-bold text-slate-700">
+                fee_loket
               </span>{" "}
               dan{" "}
               <span className="font-mono font-bold text-slate-700">
-                fee_loket
-              </span>
-              . Tindakan ini tidak dapat dibatalkan — gunakan untuk re-import
-              bersih dari awal.
+                fee_upload_logs
+              </span>{" "}
+              (riwayat upload ikut dibersihkan). Tindakan ini tidak dapat
+              dibatalkan — gunakan untuk re-import bersih dari awal.
             </p>
             {dropError && (
               <p role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">

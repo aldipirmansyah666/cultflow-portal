@@ -88,18 +88,29 @@ const BULAN_ID = [
   "Desember",
 ] as const;
 
-/** "2026-09" -> "September 2026". Fallback: kembalikan input. */
+/** "2026-09" -> "September 2026"; "2026-09-T1" -> "September 2026 - T1". Fallback: kembalikan input. */
 export function formatPeriode(periode: string): string {
-  const m = /^(\d{4})-(\d{2})$/.exec(periode.trim());
+  const m = /^(\d{4})-(\d{2})(-T([123]))?$/.exec(periode.trim());
   if (!m) return periode;
   const bulan = Number(m[2]);
   if (bulan < 1 || bulan > 12) return periode;
-  return `${BULAN_ID[bulan - 1]} ${m[1]}`;
+  const termin = m[4] !== undefined ? ` - T${m[4]}` : "";
+  return `${BULAN_ID[bulan - 1]} ${m[1]}${termin}`;
 }
 
-/** "2026-09" dari pilihan bulan (1-12) + tahun. */
-export function buildPeriode(bulan: number, tahun: number): string {
-  return `${tahun}-${String(bulan).padStart(2, "0")}`;
+/**
+ * "2026-09" dari pilihan bulan (1-12) + tahun, opsional termin (1-3).
+ * Termin membuat kunci unik per periode (`ppid` + `2026-09-T1`) sehingga
+ * upload T1/T2/T3 tidak saling menimpa.
+ */
+export function buildPeriode(bulan: number, tahun: number, termin = 0): string {
+  const base = `${tahun}-${String(bulan).padStart(2, "0")}`;
+  return termin >= 1 && termin <= 3 ? `${base}-T${termin}` : base;
+}
+
+/** Validasi string periode kanonis ("YYYY-MM" atau "YYYY-MM-T1..T3"). */
+export function isValidPeriode(value: unknown): boolean {
+  return typeof value === "string" && FEE_PERIODE_REGEX.test(value.trim());
 }
 
 /**
@@ -1850,8 +1861,8 @@ export function isProfilDbRow(row: unknown): row is LoketProfilDbRow {
   );
 }
 
-/** Periode kanonis "YYYY-MM". */
-export const FEE_PERIODE_REGEX = /^\d{4}-(0[1-9]|1[0-2])$/;
+/** Periode kanonis "YYYY-MM", opsional termin "YYYY-MM-T1..T3". */
+export const FEE_PERIODE_REGEX = /^\d{4}-(0[1-9]|1[0-2])(-T[123])?$/;
 
 /** Satu item payload impor fee (snake_case API maupun camelCase client). */
 export interface FeeImportPayloadItem {
@@ -2411,19 +2422,21 @@ export interface DropAllFeeResult {
   profiles: number;
   details: number;
   feeLoket: number;
+  /** Baris riwayat upload yang ikut dibersihkan (`fee_upload_logs`). */
+  uploadLogs: number;
 }
 
 /**
  * Reset total database fee (ADMIN): hapus SELURUH baris
- * `loket_transaction_details` + `loket_profiles` + `fee_loket` agar bisa
- * re-import bersih dari awal. Riwayat upload (`fee_upload_logs`)
- * dipertahankan sebagai jejak audit. Melempar pesan error server.
+ * `loket_transaction_details` + `loket_profiles` + `fee_loket` BESERTA
+ * riwayat upload (`fee_upload_logs`) agar log kembali bersih total.
+ * Melempar pesan error server.
  */
 export async function dropAllFeeData(): Promise<DropAllFeeResult> {
   const res = await fetch("/api/fee-rekap/drop-all", { method: "DELETE" });
   if (!res.ok) throw await readError(res, "Gagal menghapus seluruh data fee");
   const body = (await res.json()) as {
-    deleted?: Partial<Record<"profiles" | "details" | "feeLoket", unknown>>;
+    deleted?: Partial<Record<"profiles" | "details" | "feeLoket" | "uploadLogs", unknown>>;
   };
   const num = (v: unknown): number =>
     typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.floor(v)) : 0;
@@ -2431,6 +2444,7 @@ export async function dropAllFeeData(): Promise<DropAllFeeResult> {
     profiles: num(body.deleted?.profiles),
     details: num(body.deleted?.details),
     feeLoket: num(body.deleted?.feeLoket),
+    uploadLogs: num(body.deleted?.uploadLogs),
   };
 }
 
