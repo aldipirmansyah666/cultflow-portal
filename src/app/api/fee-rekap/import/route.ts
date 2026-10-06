@@ -24,7 +24,9 @@ import {
   FEE_PERIODE_REGEX,
   IMPORT_MAX_ROWS_PER_REQUEST,
   normalizeImportProfil,
+  runBatchesIsolated,
   toFeeDbRow,
+  type BatchIssue,
   type FeeDbMappedRow,
   type FeeImportPayloadItem,
   type LoketDetailDbRow,
@@ -33,6 +35,13 @@ import {
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+/**
+ * Konkurrensi worker untuk batch upsert (diteruskan ke
+ * runBatchesIsolated): 4 paralel cukup memangkas waktu fan-out
+ * details tanpa membanjiri PostgREST.
+ */
+const UPSERT_CONCURRENCY = 4;
 
 /** Alias kompatibilitas untuk payload impor fee per baris. */
 export type FeeImportItem = FeeImportPayloadItem;
@@ -160,46 +169,88 @@ export async function POST(req: Request) {
   try {
     const admin = getSupabaseAdmin();
     const BATCH = 500;
-    let upserted = 0;
-    for (let i = 0; i < deduped.length; i += BATCH) {
-      const batch = deduped.slice(i, i + BATCH);
-      // Kolom DB eksplisit (tanpa field audit internal rawTotal/clamped).
-      const payload = batch.map(
-        ({ rawTotal: _raw, clamped: _clamped, ...dbRow }) => dbRow
-      );
-      const { error } = await admin
-        .from("fee_loket")
-        .upsert(payload, { onConflict: "ppid,periode" });
-      if (error) throw error;
-      upserted += batch.length;
-    }
+    const issues: BatchIssue[] = [];
+    // Tiga tabel ditulis via batch independen terisolasi (lihat
+    // runBatchesIsolated): batch gagal + fallback per baris dicatat di
+    // issues TANPA menggugurkan batch lain — 10rb+ baris tuntas walau
+    // ada baris busuk.
+    // Kolom DB eksplisit (tanpa field audit internal rawTotal/clamped).
+    const feePayload = deduped.map(
+      ({ rawTotal: _raw, clamped: _clamped, ...dbRow }) => dbRow
+    );
+    const feeRes = await runBatchesIsolated(feePayload, {
+      batchSize: BATCH,
+      concurrency: UPSERT_CONCURRENCY,
+      table: "fee_loket",
+      keyOf: (r) => r.ppid,
+      upsertBatch: async (batch) => {
+        const { error } = await admin
+          .from("fee_loket")
+          .upsert(batch, { onConflict: "ppid,periode" });
+        if (error) throw error;
+      },
+      upsertOne: async (row) => {
+        const { error } = await admin
+          .from("fee_loket")
+          .upsert(row, { onConflict: "ppid,periode" });
+        if (error) throw error;
+      },
+      issues,
+    });
+    const upserted = feeRes.succeeded;
     // Upsert relasional Master (idempoten; 0 bila payload legacy tanpa
     // profil). Details bisa besar (10rb loket x modul aktif) sehingga
-    // di-batch 500 seperti fee utama.
+    // di-batch 500 seperti fee utama — pool konkuren di dalamnya.
     const profils = [...profilByKey.values()];
-    let profilesUpserted = 0;
-    for (let i = 0; i < profils.length; i += BATCH) {
-      const batch = profils.slice(i, i + BATCH);
-      const { error } = await admin
-        .from("loket_profiles")
-        .upsert(batch, { onConflict: "ppid,periode" });
-      if (error) throw error;
-      profilesUpserted += batch.length;
-    }
+    const profRes = await runBatchesIsolated(profils, {
+      batchSize: BATCH,
+      concurrency: UPSERT_CONCURRENCY,
+      table: "loket_profiles",
+      keyOf: (r) => r.ppid,
+      upsertBatch: async (batch) => {
+        const { error } = await admin
+          .from("loket_profiles")
+          .upsert(batch, { onConflict: "ppid,periode" });
+        if (error) throw error;
+      },
+      upsertOne: async (row) => {
+        const { error } = await admin
+          .from("loket_profiles")
+          .upsert(row, { onConflict: "ppid,periode" });
+        if (error) throw error;
+      },
+      issues,
+    });
+    const profilesUpserted = profRes.succeeded;
     const details = [...detailsByKey.values()];
-    let detailsUpserted = 0;
-    for (let i = 0; i < details.length; i += BATCH) {
-      const batch = details.slice(i, i + BATCH);
-      const { error } = await admin
-        .from("loket_transaction_details")
-        .upsert(batch, { onConflict: "ppid,periode,modul_nama" });
-      if (error) throw error;
-      detailsUpserted += batch.length;
-    }
+    const detRes = await runBatchesIsolated(details, {
+      batchSize: BATCH,
+      concurrency: UPSERT_CONCURRENCY,
+      table: "loket_transaction_details",
+      keyOf: (r) => `${r.ppid}::${r.modul_nama}`,
+      upsertBatch: async (batch) => {
+        const { error } = await admin
+          .from("loket_transaction_details")
+          .upsert(batch, { onConflict: "ppid,periode,modul_nama" });
+        if (error) throw error;
+      },
+      upsertOne: async (row) => {
+        const { error } = await admin
+          .from("loket_transaction_details")
+          .upsert(row, { onConflict: "ppid,periode,modul_nama" });
+        if (error) throw error;
+      },
+      issues,
+    });
+    const detailsUpserted = detRes.succeeded;
+    // PPID yang benar-benar hilang dari fee_loket (urutan pertama =
+    // tabel kebenaran utama; rincian details menyusul per PPID::modul).
+    const failedPpids = feeRes.failedIds.slice(0, 100);
     // Log upload hanya pada chunk terakhir agar 1 file = 1 baris log
     // dengan jumlah_baris = total seluruh chunk (bukan per chunk).
+    // Dilewati bila chunk ini nol baris tersimpan (impor gagal total).
     let logRow: unknown = null;
-    if (isLastChunk) {
+    if (isLastChunk && upserted > 0) {
       const { data, error: logError } = await admin
         .from("fee_upload_logs")
         .insert({
@@ -227,6 +278,11 @@ export async function POST(req: Request) {
       storedSum,
       zeroRows,
       skipped,
+      // Isolasi batch: masalah per batch + PPID yang gagal total agar
+      // klien dapat melanjutkan/menandai tanpa menebak.
+      batchErrors: issues,
+      failedPpids,
+      failedCount: feeRes.failedIds.length,
       log: logRow,
     });
   } catch (e) {

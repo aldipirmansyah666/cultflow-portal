@@ -15,9 +15,11 @@ import {
   type ReconcileValidationResult,
 } from "@/core/parsers/reconcileValidator";
 import {
-  columnLetter,
   extractReconcileInputRows,
   findReconcileHeader,
+  normalizeReconcileRowsFromObjects,
+  type DetectedHeader,
+  type ReconcileInputRow,
 } from "@/core/parsers/reconcileHeader";
 import { cn } from "@/lib/utils";
 
@@ -46,54 +48,81 @@ export default function ReconcilePage() {
     setResult(null);
     try {
       // exceljs dimuat on-demand agar tidak membebani initial load.
-      const { loadWorkbookFromBuffer, validateMatrixLimits, MatrixLimitError } =
-        await import("@/lib/excel");
+      const {
+        loadWorkbookFromBuffer,
+        matrixToObjects,
+        validateMatrixLimits,
+        MatrixLimitError,
+      } = await import("@/lib/excel");
       const buffer = await file.arrayBuffer();
       const workbook = await loadWorkbookFromBuffer(buffer, {
         defval: null,
         fileName: file.name,
       });
-      const firstName = workbook.sheetNames[0] ?? "";
-      const matrix = workbook.matrices.get(firstName) ?? [];
-      if (workbook.sheetNames.length === 0 || matrix.length === 0)
+      if (workbook.sheetNames.length === 0)
         throw new Error(`Berkas "${file.name}" tidak berisi sheet.`);
-      try {
-        validateMatrixLimits(matrix, {
-          maxRows: 20030,
-          maxCols: 200,
-          fileName: file.name,
-          sheetName: firstName,
-        });
-      } catch (e) {
-        // Pesan sudah spesifik (alamat sel + preview + hint) dari excel.ts.
-        // Tambahkan konteks sheet agar auditor langsung tahu lokasi.
-        if (e instanceof MatrixLimitError) throw e;
-        throw e;
+      // Pindai SEMUA sheet (ekspor sistem sering menaruh cover/rekap di
+      // sheet pertama): pilih sheet yang menghasilkan baris data terbanyak.
+      // Seri -> sheet paling awal.
+      let sheetName = "";
+      let header: DetectedHeader | null = null;
+      let inputRows: ReconcileInputRow[] = [];
+      for (const name of workbook.sheetNames) {
+        const m = workbook.matrices.get(name) ?? [];
+        if (m.length === 0) continue;
+        try {
+          validateMatrixLimits(m, {
+            maxRows: 20030,
+            maxCols: 200,
+            fileName: file.name,
+            sheetName: name,
+          });
+        } catch (e) {
+          // Pesan sudah spesifik (alamat sel + preview + hint) dari excel.ts.
+          if (e instanceof MatrixLimitError) throw e;
+          throw e;
+        }
+        const h = findReconcileHeader(m);
+        if (!h) continue;
+        const rows = extractReconcileInputRows(m, h);
+        if (rows.length > inputRows.length) {
+          sheetName = name;
+          header = h;
+          inputRows = rows;
+        }
       }
-      // Pindai SELURUH sheet (tanpa batas baris): judul laporan sepanjang
-      // apapun di atas tabel dilewati via sistem skor (lihat reconcileHeader).
-      const header = findReconcileHeader(matrix);
-      if (!header) {
-        throw new Error(
-          `Kolom Produk dan Nomor Resi tidak ditemukan di "${file.name}" (dipindai ${matrix.length} baris, seluruh sheet "${firstName}"). ` +
-            `Dikenali sebagai produk: produk/product/jenis/layanan/service/tipe; sebagai resi: nomor_resi/no_resi/resi/AWB/connote/tracking/airwaybill (tak peka huruf besar-kecil). ` +
-            (matrix.length <= 4
-              ? `File hanya terbaca ${matrix.length} baris — kemungkinan delimiter salah (CSV memakai koma vs titik-koma) atau data ada di sheet lain. `
-              : `Pastikan salah satunya tertulis sebagai judul kolom.`)
-        );
+      if (!header || inputRows.length === 0) {
+        // Fallback porting proyek lama (`normalizeReconcileRows`): baris
+        // pertama sebagai kunci objek, cocokkan kunci dengan alias.
+        for (const name of workbook.sheetNames) {
+          const m = workbook.matrices.get(name) ?? [];
+          if (m.length < 2) continue;
+          const rows = normalizeReconcileRowsFromObjects(
+            matrixToObjects<Record<string, unknown>>(m)
+          );
+          if (rows.length > inputRows.length) {
+            sheetName = name;
+            header = null;
+            inputRows = rows;
+          }
+        }
       }
-      const inputRows = extractReconcileInputRows(matrix, header);
       if (inputRows.length === 0) {
-        const checked = matrix.length - (header.row + 1);
+        const scanned = workbook.sheetNames
+          .map((n) => `"${n}" (${(workbook.matrices.get(n) ?? []).length} baris)`)
+          .join(", ");
         throw new Error(
-          `Tidak ada baris data di bawah header di "${file.name}". ` +
-            `Header terdeteksi di baris ${header.row + 1} (kolom Produk ${columnLetter(header.produkCol)} "${header.produkHeader}", ` +
-            `kolom Resi ${columnLetter(header.resiCol)} "${header.resiHeader}"); ` +
-            `${checked} baris di bawahnya kosong. ` +
-            `Jika file memiliki judul laporan di atas, itu sudah dilewati otomatis — periksa apakah data berada di sheet pertama dan kolom tidak bergeser.`
+          `Kolom Produk dan Nomor Resi ber-data tidak ditemukan di "${file.name}". ` +
+            `Sheet dipindai: ${scanned}. ` +
+            `Dikenali sebagai produk: produk/product/jenis/layanan/service/tipe; sebagai resi: nomor_resi/no_resi/resi/nomor/AWB/connote/tracking/airwaybill (tak peka huruf besar-kecil). ` +
+            `Pastikan salah satu sheet memuat kedua kolom tersebut dengan minimal 1 baris data di bawahnya.`
         );
       }
-      setFileName(file.name);
+      setFileName(
+        workbook.sheetNames.length > 1
+          ? `${file.name} — sheet "${sheetName}"`
+          : file.name
+      );
       setResult(validateReconcileRows(inputRows));
     } catch (err) {
       setParseError(

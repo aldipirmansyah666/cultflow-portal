@@ -20,8 +20,8 @@ import { getSession } from "@/lib/session";
 import {
   canonicalFeeSearch,
   classifyFeeDbError,
-  escapeFeeLike,
   normalizePpid,
+  ppidFuzzyPattern,
   ppidSearchKey,
   type LoketProfilDbRow,
 } from "@/core/services/feeRekapService";
@@ -101,10 +101,15 @@ export async function GET(req: Request) {
       }
     }
 
-    // 2) Fallback substring PPID / nama loket (abaikan case).
+    // 2) Fallback substring PPID / nama loket (abaikan case) +
+    // selalu sertakan pola hyphen-insensitive (ilike): ilike persis
+    // gagal bila salah satu sisi memakai "-" (query tanpa hubung vs
+    // DB berhubung atau sebaliknya).
     const ors: string[] = [];
     if (qPpid !== "") ors.push(`ppid.ilike.%${qPpid}%`);
     if (qNama !== "") ors.push(`nama_loket.ilike.%${qNama}%`);
+    const subFuzzy = ppidFuzzyPattern(rawQ);
+    if (subFuzzy !== null) ors.push(`ppid.ilike.${subFuzzy}`);
     if (ors.length > 0) {
       let query = admin
         .from("loket_profiles")
@@ -118,10 +123,13 @@ export async function GET(req: Request) {
         .limit(5);
       if (error) throw error;
       const rows = (data ?? []) as LoketProfilDbRow[];
-      // Prioritaskan PPID persis (dinormalisasi) di antara kandidat.
+      // Prioritaskan kecocokan presisi: hyphen-insensitive dulu
+      // ("SBPOS-CKM-001" == "SBPOSCKM001"), lalu persis dinormalisasi.
+      const keyFreeSub = ppidSearchKey(rawQ);
       const exact =
         exactPpid !== ""
-          ? rows.find((r) => normalizePpid(r.ppid) === exactPpid)
+          ? (rows.find((r) => ppidSearchKey(r.ppid) === keyFreeSub) ??
+            rows.find((r) => normalizePpid(r.ppid) === exactPpid))
           : undefined;
       const picked = exact ?? rows[0];
       if (picked) {
@@ -142,19 +150,21 @@ export async function GET(req: Request) {
       }
     }
 
-    // 2b) Fallback hyphen-insensitive: pengguna mengetik tanpa hubung
-    // ("sbposckm001") sementara DB menyimpan "SBPOS-CKM-001". SQL memakai
-    // pola fuzzy (karakter dihubungkan %) untuk recall, lalu JS memilih
+    // 2b) Fallback hyphen-insensitive: pola fuzzy (karakter dihubungkan
+    // %) untuk recall (ilike agar case-insensitive), lalu JS memilih
     // presisi (ppidSearchKey equality > substring). Dibatasi 20 kandidat.
+    // Dijalankan SELALU saat substring tak cocok (bukan hanya bila query
+    // berhubung): query tanpa hubung vs DB berhubung gagal di semua
+    // tahap sebelumnya.
     const keyFree = ppidSearchKey(rawQ);
-    if (keyFree !== "" && keyFree !== exactPpid) {
-      const fuzzy = `%${escapeFeeLike(keyFree).split("").join("%")}%`;
+    const fuzzy = ppidFuzzyPattern(rawQ);
+    if (keyFree !== "" && fuzzy !== null) {
       let query = admin
         .from("loket_profiles")
         .select(
           PROFIL_COLUMNS
         )
-        .like("ppid", fuzzy);
+        .ilike("ppid", fuzzy);
       if (periode !== "") query = query.eq("periode", periode);
       const { data, error } = await query
         .order("periode", { ascending: false })
@@ -186,6 +196,8 @@ export async function GET(req: Request) {
     const legacyOrs: string[] = [];
     if (qPpid !== "") legacyOrs.push(`ppid.ilike.%${qPpid}%`);
     if (qNama !== "") legacyOrs.push(`nama_loket.ilike.%${qNama}%`);
+    const legacyFuzzy = ppidFuzzyPattern(rawQ);
+    if (legacyFuzzy !== null) legacyOrs.push(`ppid.ilike.${legacyFuzzy}`);
     if (legacyOrs.length > 0) {
       let query = admin
         .from("fee_loket")
@@ -203,9 +215,11 @@ export async function GET(req: Request) {
         total_fee: unknown;
         status: unknown;
       }[];
+      const keyFreeSubLegacy = ppidSearchKey(rawQ);
       const exact =
         exactPpid !== ""
-          ? rows.find((r) => normalizePpid(r.ppid) === exactPpid)
+          ? (rows.find((r) => ppidSearchKey(r.ppid) === keyFreeSubLegacy) ??
+            rows.find((r) => normalizePpid(r.ppid) === exactPpid))
           : undefined;
       const picked = exact ?? rows[0];
       if (picked) {

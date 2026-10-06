@@ -420,6 +420,20 @@ export function ppidSearchKey(value: unknown): string {
   return normalizePpid(value).replace(/-/g, "");
 }
 
+/**
+ * Pola LIKE hyphen-insensitive untuk kolom PPID (`%S%B%P%...%`):
+ * menemukan baris apa pun penempatan "-" di sisi query maupun DB
+ * (ilike persis gagal bila salah satu sisi berhubung). Dipakai dengan
+ * `ilike` (bukan `like`) agar case-insensitive. Null bila query kosong.
+ * Recall sengaja luas; presisi dipilih di JS via ppidSearchKey equality.
+ */
+export function ppidFuzzyPattern(rawQ: unknown): string | null {
+  const text = rawQ === null || rawQ === undefined ? "" : String(rawQ);
+  const keyFree = ppidSearchKey(text);
+  if (keyFree === "") return null;
+  return `%${escapeFeeLike(keyFree).split("").join("%")}%`;
+}
+
 /** Nama loket tampilan dengan fallback ke PPID bila kosong (data master/API). */
 export function displayNamaLoket(
   row: Pick<FeeRekapRow, "namaLoket" | "ppid">
@@ -429,8 +443,9 @@ export function displayNamaLoket(
 }
 
 /**
- * Lookup strict baris loket untuk modal/detail:
- * String(row.ppid).trim().toUpperCase() === String(ppid).trim().toUpperCase(),
+ * Lookup strict baris loket untuk modal/detail: cocok persis
+ * (case-insensitive, abaikan spasi) ATAU hyphen-insensitive
+ * (abaikan pula "-": "SBPOS-CKM-001" == "SBPOSCKM001"),
  * opsional filter periode, terurut periode menurun.
  */
 export function getSelectedLoketData(
@@ -440,10 +455,12 @@ export function getSelectedLoketData(
 ): FeeRekapRow[] {
   const key = normalizePpid(ppid);
   if (key === "") return [];
+  const keyFree = ppidSearchKey(ppid);
   return rows
     .filter(
       (r) =>
-        normalizePpid(r.ppid) === key &&
+        (normalizePpid(r.ppid) === key ||
+          (keyFree !== "" && ppidSearchKey(r.ppid) === keyFree)) &&
         (periode === "" || periode === "SEMUA" || r.periode === periode)
     )
     .sort((a, b) => b.periode.localeCompare(a.periode));
@@ -1517,6 +1534,99 @@ export const IMPORT_CHUNK_SIZE = 500;
 /** Maksimal baris per satu request POST impor di server. */
 export const IMPORT_MAX_ROWS_PER_REQUEST = 1000;
 
+/** Satu masalah batch terisolasi (dilaporkan ke admin, bukan throw). */
+export interface BatchIssue {
+  /** Nomor batch global (1-based) di dalam tabelnya. */
+  batch: number;
+  table: string;
+  message: string;
+}
+
+export interface IsolatedBatchOutcome {
+  succeeded: number;
+  failedIds: string[];
+}
+
+function batchErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "object" && e !== null && "message" in e) {
+    return String((e as { message: unknown }).message);
+  }
+  return "Upsert batch gagal";
+}
+
+/**
+ * Orkestrasi batch independen (murni, I/O diinjeksikan):
+ * tiap batch di-upsert via pool konkuren; batch gagal di-retry 1x,
+ * lalu fallback per baris (baris busuk diisolasi ke failedIds,
+ * sisanya tetap tersimpan); masalah dicatat ke `issues` TANPA
+ * melempar — batch lain tidak ikut rusak. Idempoten bila upsert
+ * memakai onConflict (pengulangan aman).
+ */
+export async function runBatchesIsolated<T>(
+  rows: T[],
+  opts: {
+    batchSize?: number;
+    concurrency?: number;
+    table: string;
+    keyOf: (row: T) => string;
+    upsertBatch: (batch: T[]) => Promise<void>;
+    upsertOne: (row: T) => Promise<void>;
+    issues: BatchIssue[];
+  }
+): Promise<IsolatedBatchOutcome> {
+  const batchSize = Math.max(1, opts.batchSize ?? 500);
+  const concurrency = Math.max(1, opts.concurrency ?? 4);
+  const batches: T[][] = [];
+  for (let i = 0; i < rows.length; i += batchSize) {
+    batches.push(rows.slice(i, i + batchSize));
+  }
+  let succeeded = 0;
+  const failedIds: string[] = [];
+  let next = 0;
+  const runBatch = async (batch: T[], batchNo: number): Promise<void> => {
+    try {
+      await opts.upsertBatch(batch);
+    } catch {
+      try {
+        await opts.upsertBatch(batch);
+      } catch (retryErr) {
+        let okInBatch = 0;
+        for (const row of batch) {
+          try {
+            await opts.upsertOne(row);
+            okInBatch += 1;
+          } catch {
+            failedIds.push(opts.keyOf(row));
+          }
+        }
+        succeeded += okInBatch;
+        opts.issues.push({
+          batch: batchNo,
+          table: opts.table,
+          message: batchErrorMessage(retryErr),
+        });
+        return;
+      }
+    }
+    succeeded += batch.length;
+  };
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const idx = next;
+      next += 1;
+      if (idx >= batches.length) return;
+      await runBatch(batches[idx] as T[], idx + 1);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, Math.max(1, batches.length)) }, () =>
+      worker()
+    )
+  );
+  return { succeeded, failedIds };
+}
+
 /** Pecah array menjadi potongan berukuran `size` (terakhir bisa lebih kecil). */
 export function splitIntoChunks<T>(rows: T[], size: number): T[][] {
   const chunk = Math.max(1, Math.floor(size) || 1);
@@ -1874,7 +1984,8 @@ export async function fetchFeeList(params: FeeListParams = {}): Promise<FeeListR
   if (params.q) query.set("q", params.q);
   if (params.periode) query.set("periode", params.periode);
   query.set("page", String(params.page ?? 1));
-  query.set("pageSize", String(params.pageSize ?? 2000));
+  // Default selaras cap PostgREST max_rows=1000 (lihat MAX_PAGE_SIZE API).
+  query.set("pageSize", String(params.pageSize ?? 1000));
   const res = await fetch(`/api/fee-rekap?${query.toString()}`);
   if (!res.ok) throw await readError(res, "Gagal memuat fee");
   const body = (await res.json()) as {
@@ -1906,7 +2017,7 @@ export async function fetchFeeList(params: FeeListParams = {}): Promise<FeeListR
     data,
     total,
     page: body.page ?? 1,
-    pageSize: body.pageSize ?? 2000,
+    pageSize: body.pageSize ?? 1000,
     totalPages: body.totalPages ?? 1,
     truncated,
     summarySource:
@@ -1943,6 +2054,10 @@ export interface SaveFeeImportResult {
   profilesUpserted: number;
   /** Rincian modul ter-upsert ke loket_transaction_details. */
   detailsUpserted: number;
+  /** Masalah batch terisolasi per chunk (kosong bila semua mulus). */
+  batchErrors: BatchIssue[];
+  /** PPID yang gagal total di server (melempar bila tak-kosong). */
+  failedPpids: string[];
 }
 
 export interface SaveFeeProgress {
@@ -2015,50 +2130,159 @@ export async function saveFeeImport(
       : {}),
   }));
   const chunks = splitIntoChunks(payload, IMPORT_CHUNK_SIZE);
+  const sleep = (ms: number): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, ms));
   let upserted = 0;
   let receivedSum = 0;
   let storedSum = 0;
   let zeroRows = 0;
   let profilesUpserted = 0;
   let detailsUpserted = 0;
+  const batchErrors: BatchIssue[] = [];
+  const failedPpids: string[] = [];
   for (let i = 0; i < chunks.length; i += 1) {
-    const res = await fetch("/api/fee-rekap/import", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        rows: chunks[i],
-        fileName: input.fileName,
-        periode: input.periode,
-        totalRows: payload.length,
-        chunk: { index: i, total: chunks.length },
-      }),
-    });
-    if (!res.ok) {
-      const err = await readError(res, "Gagal menyimpan fee");
-      // Sertakan posisi chunk agar admin tahu progres saat gagal di tengah jalan.
-      throw new Error(`${err.message} (batch ${i + 1}/${chunks.length})`);
+    // Retry per chunk (maks 3 percobaan, backoff 1s/2s/4s): file 10rb+
+    // baris = 20+ request sekuensial; satu timeout transien/5xx/429 tidak
+    // boleh menggugurkan seluruh impor. Aman karena upsert server
+    // idempoten (onConflict ppid+periode). Error 4xx (validasi) TIDAK
+    // di-retry — mengulanginya sia-sia.
+    const maxAttempts = 3;
+    let attempt = 0;
+    for (;;) {
+      attempt += 1;
+      let res: Response;
+      try {
+        res = await fetch("/api/fee-rekap/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rows: chunks[i],
+            fileName: input.fileName,
+            periode: input.periode,
+            totalRows: payload.length,
+            chunk: { index: i, total: chunks.length },
+          }),
+          // Di bawah maxDuration=60 server agar stall terdeteksi +
+          // di-retry, bukan menggantung selamanya.
+          signal: AbortSignal.timeout(55000),
+        });
+      } catch (err) {
+        if (attempt >= maxAttempts) {
+          throw new Error(
+            `Chunk ${i + 1}/${chunks.length} gagal terkirim 3x (${err instanceof Error ? err.message : "jaringan terputus"}). Coba simpan ulang — baris yang sudah masuk aman (idempoten).`
+          );
+        }
+        await sleep(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+      if (!res.ok) {
+        if (
+          attempt < maxAttempts &&
+          (res.status >= 500 || res.status === 429)
+        ) {
+          await readError(res, "Gagal menyimpan fee").catch(() => null);
+          await sleep(1000 * 2 ** (attempt - 1));
+          continue;
+        }
+        const err = await readError(res, "Gagal menyimpan fee");
+        // Sertakan posisi chunk agar admin tahu progres saat gagal di tengah jalan.
+        throw new Error(`${err.message} (batch ${i + 1}/${chunks.length})`);
+      }
+      const body = (await res.json()) as {
+        upserted: number;
+        periode: string;
+        receivedSum?: unknown;
+        storedSum?: unknown;
+        zeroRows?: unknown;
+        profilesUpserted?: unknown;
+        detailsUpserted?: unknown;
+        batchErrors?: unknown;
+        failedPpids?: unknown;
+      };
+      upserted += body.upserted ?? 0;
+      receivedSum += parseAmount(body.receivedSum ?? 0);
+      storedSum += parseAmount(body.storedSum ?? 0);
+      const z = body.zeroRows;
+      zeroRows += typeof z === "number" && Number.isFinite(z) ? Math.max(0, Math.floor(z)) : 0;
+      const pu = body.profilesUpserted;
+      profilesUpserted += typeof pu === "number" && Number.isFinite(pu) ? Math.max(0, Math.floor(pu)) : 0;
+      const du = body.detailsUpserted;
+      detailsUpserted += typeof du === "number" && Number.isFinite(du) ? Math.max(0, Math.floor(du)) : 0;
+      if (Array.isArray(body.batchErrors)) {
+        for (const b of body.batchErrors) {
+          if (
+            typeof b === "object" &&
+            b !== null &&
+            typeof (b as { batch?: unknown }).batch === "number"
+          ) {
+            batchErrors.push(b as BatchIssue);
+          }
+        }
+      }
+      if (Array.isArray(body.failedPpids)) {
+        for (const p of body.failedPpids) {
+          if (typeof p === "string" && p !== "" && !failedPpids.includes(p)) {
+            failedPpids.push(p);
+          }
+        }
+      }
+      onProgress?.({ done: i + 1, total: chunks.length, upserted });
+      break;
     }
-    const body = (await res.json()) as {
-      upserted: number;
-      periode: string;
-      receivedSum?: unknown;
-      storedSum?: unknown;
-      zeroRows?: unknown;
-      profilesUpserted?: unknown;
-      detailsUpserted?: unknown;
-    };
-    upserted += body.upserted ?? 0;
-    receivedSum += parseAmount(body.receivedSum ?? 0);
-    storedSum += parseAmount(body.storedSum ?? 0);
-    const z = body.zeroRows;
-    zeroRows += typeof z === "number" && Number.isFinite(z) ? Math.max(0, Math.floor(z)) : 0;
-    const pu = body.profilesUpserted;
-    profilesUpserted += typeof pu === "number" && Number.isFinite(pu) ? Math.max(0, Math.floor(pu)) : 0;
-    const du = body.detailsUpserted;
-    detailsUpserted += typeof du === "number" && Number.isFinite(du) ? Math.max(0, Math.floor(du)) : 0;
-    onProgress?.({ done: i + 1, total: chunks.length, upserted });
   }
-  return { upserted, periode: input.periode, receivedSum, storedSum, zeroRows, profilesUpserted, detailsUpserted };
+  if (failedPpids.length > 0) {
+    throw new Error(
+      `${failedPpids.length} PPID gagal tersimpan (contoh: ${failedPpids.slice(0, 5).join(", ")}). ` +
+        `${upserted} baris lain tetap tersimpan — perbaiki baris tersebut dan simpan ulang (idempoten).`
+    );
+  }
+  return { upserted, periode: input.periode, receivedSum, storedSum, zeroRows, profilesUpserted, detailsUpserted, batchErrors, failedPpids };
+}
+
+export interface VerifyFeeImportResult {
+  periode: string;
+  /** PPID unik preview yang dicek. */
+  total: number;
+  /** PPID ditemukan di fee_loket ATAU loket_profiles periode tersebut. */
+  found: number;
+  missingCount: number;
+  /** Sampel PPID hilang (maks 100). */
+  missing: string[];
+}
+
+/**
+ * Rekonsiliasi pasca-impor: pastikan setiap PPID preview benar-benar
+ * ada di database (menutup celah "PPID terlewat diam-diam" yang tak
+ * terlihat dari hitungan baris/sum). Melempar bila respons tak valid.
+ */
+export async function verifyFeeImport(
+  ppids: string[],
+  periode: string
+): Promise<VerifyFeeImportResult> {
+  const res = await fetch("/api/fee-rekap/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ppids, periode }),
+  });
+  if (!res.ok) throw await readError(res, "Verifikasi PPID gagal");
+  const body = (await res.json()) as Partial<VerifyFeeImportResult> & {
+    error?: string;
+  };
+  if (
+    typeof body.total !== "number" ||
+    typeof body.found !== "number" ||
+    typeof body.missingCount !== "number" ||
+    !Array.isArray(body.missing)
+  ) {
+    throw new Error("Respons verifikasi tidak valid.");
+  }
+  return {
+    periode: typeof body.periode === "string" ? body.periode : periode,
+    total: body.total,
+    found: body.found,
+    missingCount: body.missingCount,
+    missing: body.missing.filter((m): m is string => typeof m === "string"),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2624,6 +2848,22 @@ export interface LoketBsbFullParse {
 }
 
 /**
+ * Guard generalisasi tabular massal: hasil Full atas sheet bukan-BSB
+ * hanya dipakai bila nontrivial (ada fee ATAU rincian) — menolak
+ * hasil Rp-0 massal dari salah-peta kolom agar fallback dinamis tetap
+ * berjalan. Dipakai alur multi-sheet halaman impor.
+ */
+export function isNontrivialFullParse(
+  full: LoketBsbFullParse | null
+): boolean {
+  if (!full || full.rows.length === 0) return false;
+  return (
+    full.rows.some((r) => r.totalFee !== 0) ||
+    full.profiles.some((p) => p.details.length > 0)
+  );
+}
+
+/**
  * Parser ABSOLUT PENUH sheet `Loket BSB` — meniru Excel Master:
  * identitas (1-7) + ringkasan keuangan (189-196) + rincian 79 modul
  * per pola sheet `Cari`. Return null bila sanity header gagal
@@ -2757,6 +2997,436 @@ export function parseLoketBsbFull(
     });
   }
   return { profiles, rows, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Sheet `Cari`: BUKAN tabel multi-baris melainkan FORM lookup satu loket —
+// blok label + ":" + nilai/VLOOKUP (posisi klasik: C/D/E, varian: E4 dst.)
+// + tabel modul (klasik K-N: MODUL|LEMBAR|FEE/LEMBAR|TOTAL, posisi bisa
+// bergeser pada varian). Nilai terisi (cached VLOOKUP) hanya bila PPID
+// pernah diketik + file disimpan; template kosong berarti tidak ada data
+// dan wajib dilewati. Parser dinamis tabel TIDAK boleh menyentuh sheet
+// ini (label form jadi baris sampah), sehingga deteksi eksplisit di bawah.
+// Semua posisi DIRESOLUSI dari label (relatif), bukan indeks fix.
+// ---------------------------------------------------------------------------
+
+/** Posisi klasik form `Cari` (0-based) — dipakai sebagai fallback. */
+const CARI_LABEL_COL = 2;
+
+/** Batas pindai label form (kolom) dan baris form saat resolusi relatif. */
+const CARI_LABEL_SCAN_COLS = 8;
+const CARI_LABEL_SCAN_ROWS = 48;
+
+/**
+ * Cari baris header tabel modul: sel "modul" diikuti "lembar" di
+ * kolom sebelahnya (posisi kolom bebas). Kembalikan indeks kolom
+ * MODUL/LEMBAR/FEE/TOTAL yang diresolusi dari label header
+ * (fallback +2/+3 bila label fee/total tak dikenali).
+ */
+function findCariModuleHeader(matrix: unknown[][]): {
+  rowIdx: number;
+  modulCol: number;
+  lembarCol: number;
+  feeCol: number;
+  totalCol: number;
+} | null {
+  for (let i = 0; i < Math.min(matrix.length, 12); i += 1) {
+    const row = matrix[i];
+    if (!Array.isArray(row)) continue;
+    for (let c = 0; c <= 14; c += 1) {
+      if (normalizeHeaderCell(row[c]) !== "modul") continue;
+      if (normalizeHeaderCell(row[c + 1]) !== "lembar") continue;
+      let feeCol = c + 2;
+      let totalCol = c + 3;
+      for (let k = c + 2; k <= Math.min(row.length - 1, c + 4); k += 1) {
+        const h = normalizeHeaderCell(row[k]);
+        if (h === "fee lembar" || h === "fee per lembar" || h === "feelembar") {
+          feeCol = k;
+        } else if (h === "total fee") {
+          totalCol = k;
+        }
+      }
+      return { rowIdx: i, modulCol: c, lembarCol: c + 1, feeCol, totalCol };
+    }
+  }
+  return null;
+}
+
+/**
+ * True bila matriks berlayout form `Cari`: header tabel MODUL+LEMBAR
+ * (posisi bebas) plus label form "PPID" (posisi bebas, dengan ":"
+ * di sebelahnya atau di kolom klasik) — kombinasi yang tidak dimiliki
+ * tabel fee generik.
+ */
+export function isCariSheetMatrix(matrix: unknown[][]): boolean {
+  if (!Array.isArray(matrix) || matrix.length < 10) return false;
+  if (!findCariModuleHeader(matrix)) return false;
+  return matrix.slice(0, 16).some((row) => {
+    if (!Array.isArray(row)) return false;
+    for (let c = 0; c <= 6; c += 1) {
+      if (normalizeHeaderCell(row[c]) !== "ppid") continue;
+      const next = cellText(row[c + 1]).trim();
+      if (next === ":" || c === CARI_LABEL_COL) return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * Ambil nilai di kanan label: sel tak-kosong pertama dalam 3 kolom
+ * setelah label, melewati ":" dan sel kosong. Angka 0 dipertahankan
+ * (nilai valid, bukan kosong). Diekspor untuk diagnostik transparansi
+ * per sheet di UI upload (E3/E6 form `Cari`).
+ */
+export function cariValueFromRow(row: unknown[], labelCol: number): unknown {
+  for (
+    let c = labelCol + 1;
+    c <= Math.min(row.length - 1, labelCol + 3);
+    c += 1
+  ) {
+    const v = row[c];
+    if (v === null || v === undefined) continue;
+    if (typeof v === "string") {
+      const t = v.trim();
+      if (t === "" || t === ":") continue;
+    }
+    return v;
+  }
+  return "";
+}
+
+/** Label form `Cari` (ternormalisasi) -> peran. First-match menang. */
+const CARI_FIELD_BY_LABEL: Record<string, string> = {
+  ppid: "ppid",
+  // Sel input PPID: label "Masukan PPID / Kode" (E3) maupun "PPID" (E6).
+  "masukan ppid kode": "ppid",
+  "masukan ppid": "ppid",
+  "kode ppid": "ppid",
+  "nama loket": "namaLoket",
+  "nomor rekening": "noRekening",
+  "rekening bank": "bank",
+  "pemilik rekening": "namaPemilik",
+  "fee bulan ini": "feeBulanIni",
+  "fee bulan sebelumnya": "feeBulanSebelumnya",
+  "subsidi antar loket": "subsidiAntarLoket",
+  "minus loket": "minus",
+  "fee di tahan": "hold",
+  "potongan lainnya": "potonganLainnya",
+  "potongan ongkir": "potonganOngkir",
+  "fee ke deposit": "feeKeDeposit",
+  "fee di transfer ke rek": "feeTransferRekening",
+  keterangan: "keterangan",
+  "transfer tanggal": "tanggalTransfer",
+  "fee siap transfer": "feeSiapTransfer",
+};
+
+export interface CariSheetParse {
+  row: FeeRekapRow;
+  /** Baris header tabel modul (0-based) untuk label diagnostik. */
+  headerRow: number;
+}
+
+/**
+ * Parse form `Cari` menjadi SATU baris Master (profil + rincian modul),
+ * setara kualitas `parseLoketBsbFull`. Null bila PPID (E6) kosong —
+ * template belum diisi, bukan error. Uang mengikuti semantik formula
+ * sheet: E14 = Bulan Ini + Bulan Sebelumnya + Subsidi.
+ */
+export function parseCariSheet(
+  matrix: unknown[][],
+  periodeFallback: string,
+  fileLabel = "import"
+): CariSheetParse | null {
+  if (!isCariSheetMatrix(matrix)) return null;
+  const rows = Array.isArray(matrix) ? matrix : [];
+
+  const textFields: Record<string, string> = {};
+  const numFields: Record<string, number> = {};
+  // Resolusi relatif: label dicari di kolom 0-8 (first-match menang),
+  // nilai = sel tak-kosong pertama di kanannya (melewati ":").
+  // Menangani varian posisi (E4 vs E6, kolom bergeser) tanpa indeks fix.
+  // Nilai KOSONG tidak mengklaim peran (lanjut pindai) agar input E3
+  // yang kosong tidak menutupi nilai E6 yang terisi, dan sebaliknya.
+  for (const row of rows.slice(0, CARI_LABEL_SCAN_ROWS)) {
+    if (!Array.isArray(row)) continue;
+    for (let c = 0; c <= Math.min(row.length - 1, CARI_LABEL_SCAN_COLS); c += 1) {
+      const role = CARI_FIELD_BY_LABEL[normalizeHeaderCell(row[c])];
+      if (!role || role in textFields || role in numFields) continue;
+      const raw = cariValueFromRow(row, c);
+      if (role === "ppid") {
+        const norm = normalizePpid(raw);
+        if (norm === "") continue;
+        textFields[role] = norm;
+      } else if (
+        role === "feeBulanIni" ||
+        role === "feeBulanSebelumnya" ||
+        role === "subsidiAntarLoket" ||
+        role === "minus" ||
+        role === "hold" ||
+        role === "potonganLainnya" ||
+        role === "potonganOngkir" ||
+        role === "feeKeDeposit" ||
+        role === "feeTransferRekening" ||
+        role === "feeSiapTransfer"
+      ) {
+        if (
+          raw === null ||
+          raw === undefined ||
+          (typeof raw === "string" && raw.trim() === "")
+        ) {
+          continue;
+        }
+        numFields[role] = parseAmount(raw);
+      } else {
+        const t = cellText(raw);
+        if (t === "") continue;
+        textFields[role] = t;
+      }
+      break;
+    }
+  }
+
+  const ppid = textFields.ppid ?? "";
+  if (ppid === "") return null;
+  const periode = periodeFallback;
+  const namaLoket = textFields.namaLoket || ppid;
+  const feeBulanIni = numFields.feeBulanIni ?? 0;
+  const feeBulanSebelumnya = numFields.feeBulanSebelumnya ?? 0;
+  const subsidiAntarLoket = numFields.subsidiAntarLoket ?? 0;
+  // E14 sheet `Cari`: Total Fee = Bulan Ini + Bulan Sebelumnya + Subsidi.
+  const totalFee = feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket;
+  const minus = numFields.minus ?? 0;
+  const hold = numFields.hold ?? 0;
+  const potonganLainnya = numFields.potonganLainnya ?? 0;
+  const potonganOngkir = numFields.potonganOngkir ?? 0;
+  // E19 = Total Fee − Potongan Lainnya − Ongkir (cermin BSB E19).
+  const totalFeeTransfer = totalFee - potonganLainnya - potonganOngkir;
+  const feeKeDeposit = numFields.feeKeDeposit ?? 0;
+  const feeTransferRekening = numFields.feeTransferRekening ?? 0;
+  // E24 = Total Fee di Transfer − Deposit − Transfer ke Rek.
+  const sisaFee = totalFeeTransfer - feeKeDeposit - feeTransferRekening;
+  const feeSiapTransfer = numFields.feeSiapTransfer ?? 0;
+  const statusPembayaran = deriveRichStatus(feeKeDeposit, feeTransferRekening);
+
+  // Tabel modul di bawah header MODUL|LEMBAR: cached VLOOKUP per modul.
+  // Kolom diresolusi dari label header (posisi bebas). Sparse seperti
+  // buildModuleBreakdown (nol ganda dibuang; UI mengisi katalog penuh
+  // via buildFullModuleBreakdown).
+  const moduleHeader = findCariModuleHeader(rows);
+  const headerRow = moduleHeader ? moduleHeader.rowIdx : -1;
+  const details: TransactionBreakdown[] = [];
+  if (moduleHeader) {
+    const { modulCol, lembarCol, feeCol, totalCol } = moduleHeader;
+    for (
+      let r = headerRow + 1;
+      r < Math.min(rows.length, headerRow + 1 + 120);
+      r += 1
+    ) {
+      const cells = rows[r];
+      if (!Array.isArray(cells)) continue;
+      const modul = cellText(cells[modulCol]);
+      if (modul === "") continue;
+      const lembar = parseAmount(cells[lembarCol]);
+      const feePerLembar = parseAmount(cells[feeCol]);
+      const total = parseAmount(cells[totalCol]);
+      if (lembar === 0 && feePerLembar === 0 && total === 0) continue;
+      details.push({ modul, lembar, feePerLembar, total });
+    }
+  }
+
+  const profil: LoketProfileFull = {
+    ppid,
+    namaLoket,
+    bank: textFields.bank ?? "",
+    noRekening: textFields.noRekening ?? "",
+    namaPemilik: textFields.namaPemilik ?? "",
+    rekomender: "",
+    elektrikArea: "",
+    periode,
+    feeBulanIni,
+    feeBulanSebelumnya,
+    subsidiAntarLoket,
+    totalFee,
+    minus,
+    hold,
+    potonganLainnya,
+    potonganOngkir,
+    totalFeeTransfer,
+    feeKeDeposit,
+    feeTransferRekening,
+    sisaFee,
+    keterangan: textFields.keterangan ?? "",
+    tanggalTransfer: textFields.tanggalTransfer ?? "",
+    feeSiapTransfer,
+    statusPembayaran,
+    details,
+  };
+
+  const paid =
+    totalFeeTransfer > 0 || feeKeDeposit > 0 || feeTransferRekening > 0;
+  const clamped = clampFeeTotal(totalFee);
+  const rincian: FeeRincian[] = [
+    { label: "Fee Bulan Ini", nilai: feeBulanIni },
+    { label: "Fee Bulan Sebelumnya", nilai: feeBulanSebelumnya },
+  ];
+  if (subsidiAntarLoket !== 0)
+    rincian.push({ label: "Subsidi Antar Loket", nilai: subsidiAntarLoket });
+  if (minus !== 0) rincian.push({ label: "Minus", nilai: minus });
+  if (hold !== 0) rincian.push({ label: "Hold", nilai: hold });
+  if (potonganLainnya !== 0)
+    rincian.push({ label: "Potongan Lainnya", nilai: potonganLainnya });
+  if (potonganOngkir !== 0)
+    rincian.push({ label: "Potongan Ongkir", nilai: potonganOngkir });
+  rincian.push({ label: "Fee Siap Transfer", nilai: feeSiapTransfer });
+  if (clamped.clamped) {
+    rincian.push({
+      label: `OVER_DEDUCTED_CLAMPED (nilai asli ${clamped.raw})`,
+      nilai: 0,
+    });
+  }
+  return {
+    row: {
+      id: `${fileLabel}-cari-${ppid}`,
+      ppid,
+      namaLoket,
+      periode,
+      totalFee: clamped.total,
+      status: paid ? "TERBAYAR" : "PENDING",
+      rincian,
+      updatedAt: new Date().toISOString(),
+      ...(clamped.clamped ? { auditFlag: "OVER_DEDUCTED_CLAMPED" as const } : {}),
+      profil,
+    },
+    headerRow,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Pindai universal (last resort): untuk sheet yang GAGAL dikenali semua
+// parser spesifik (BSB-target, form Cari, tabel dinamis). Setiap baris
+// yang memuat sel format-PPID + bukti uang langsung diekstrak — tanpa
+// bergantung pada header/label form apa pun.
+// Batasan sadar: heuristik, bukan kepastian. Dijalankan TERAKHIR dan
+// hanya untuk sheet yang menyumbang NOL baris, hasilnya masuk preview
+// (gerbang manusia) + verifikasi DB. Label rincian eksplisit
+// "pindai universal" agar asal datanya transparan.
+// ---------------------------------------------------------------------------
+
+/**
+ * Pola kasar PPID: huruf DAN angka, min 8 char, charset kode.
+ * Menolak: header ("PPID", "MODUL" — tanpa angka), nominal murni
+ * ("114800" — tanpa huruf), tanggal ("2026-09-22" — ada pemisah).
+ */
+const PPID_LIKE_REGEX = /^(?=.*\d)(?=.*[A-Z])[A-Z0-9-]{8,}$/;
+
+/** True bila sel tampak seperti kode PPID (setelah dinormalisasi). */
+export function isPpidLike(value: unknown): boolean {
+  const norm = normalizePpid(value);
+  if (norm === "") return false;
+  return PPID_LIKE_REGEX.test(norm);
+}
+
+/** Nominal minimum agar nomor urut/tahun tak terbaca sebagai fee (Rp). */
+export const UNIVERSAL_MIN_FEE = 100;
+
+/** Lebar pindai PPID per baris (kolom) pada mode universal. */
+const UNIVERSAL_SCAN_COLS = 30;
+
+export interface UniversalScanResult {
+  rows: FeeRekapRow[];
+  /** Baris ber-PPID tapi tanpa bukti uang (dilewati, bukan error). */
+  skipped: number;
+}
+
+/**
+ * Pindai semua baris: PPID = sel format-PPID pertama (30 kolom pertama),
+ * nama = sel teks pertama di kanan (lalu kiri, lalu PPID), fee = nominal
+ * terbesar baris (minimal UNIVERSAL_MIN_FEE). Tanpa profil (legacy).
+ */
+export function parseUniversalFeeRows(
+  matrix: unknown[][],
+  periodeFallback: string,
+  fileLabel = "import"
+): UniversalScanResult {
+  const rows: FeeRekapRow[] = [];
+  let skipped = 0;
+  const clean = trimTrailingEmptyRows(Array.isArray(matrix) ? matrix : []);
+  for (let r = 0; r < clean.length; r += 1) {
+    const cells = clean[r];
+    if (!Array.isArray(cells)) continue;
+    let ppidCol = -1;
+    let ppid = "";
+    const width = Math.min(cells.length, UNIVERSAL_SCAN_COLS);
+    for (let c = 0; c < width; c += 1) {
+      const cand = normalizePpid(cells[c]);
+      if (cand !== "" && isPpidLike(cand)) {
+        ppidCol = c;
+        ppid = cand;
+        break;
+      }
+    }
+    if (ppidCol === -1) continue;
+    // Bukti uang = nominal terbesar baris DI LUAR sel PPID (digit dalam
+    // kode PPID bukan uang — parseAmount("53BSPA09884JBKTK") mengekstrak
+    // angka). Minimal UNIVERSAL_MIN_FEE agar nomor urut/tahun tak ikut.
+    let fee = 0;
+    for (let c = 0; c < cells.length; c += 1) {
+      if (c === ppidCol) continue;
+      const n = parseAmount(cells[c]);
+      if (Number.isFinite(n) && n > fee) fee = n;
+    }
+    if (fee < UNIVERSAL_MIN_FEE) {
+      skipped += 1;
+      continue;
+    }
+    const isNameCell = (v: unknown): string | null => {
+      if (typeof v !== "string") return null;
+      const t = v.replace(/[\u00a0\uFEFF\u200B-\u200D\u2060\u180E]/g, " ").trim();
+      if (t.length < 2 || /^\d[\d.,]*$/.test(t)) return null;
+      return t;
+    };
+    let nama = "";
+    for (let c = ppidCol + 1; c < cells.length; c += 1) {
+      const t = isNameCell(cells[c]);
+      if (t !== null) {
+        nama = t;
+        break;
+      }
+    }
+    if (nama === "") {
+      for (let c = ppidCol - 1; c >= 0; c -= 1) {
+        const t = isNameCell(cells[c]);
+        if (t !== null) {
+          nama = t;
+          break;
+        }
+      }
+    }
+    const namaLoket = nama !== "" ? nama : ppid;
+    const clamped = clampFeeTotal(fee);
+    rows.push({
+      id: `${fileLabel}-universal-${r}`,
+      ppid,
+      namaLoket,
+      periode: periodeFallback,
+      totalFee: clamped.total,
+      status: "PENDING",
+      rincian: [
+        { label: "Total fee (pindai universal)", nilai: clamped.total },
+        ...(clamped.clamped
+          ? [
+              {
+                label: `OVER_DEDUCTED_CLAMPED (nilai asli ${clamped.raw})`,
+                nilai: 0,
+              },
+            ]
+          : []),
+      ],
+      updatedAt: new Date().toISOString(),
+      ...(clamped.clamped ? { auditFlag: "OVER_DEDUCTED_CLAMPED" as const } : {}),
+    });
+  }
+  return { rows, skipped };
 }
 
 /** Skor kolom minimal untuk sanity header absolut (duplikat ringan agar tidak mengubah skor dinamis). */

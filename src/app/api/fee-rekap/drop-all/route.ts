@@ -28,13 +28,15 @@ async function deleteAll(
   admin: SupabaseClient,
   table: string
 ): Promise<number> {
-  const { data, error } = await admin
+  // Hitung via count exact (head, tanpa select id): .select("id") sesudah
+  // delete mentransfer SEMUA id dan ikut terpotong cap PostgREST
+  // max_rows=1000 sehingga jumlah terlapor salah pada tabel besar.
+  const { count, error } = await admin
     .from(table)
-    .delete()
-    .neq("id", NEVER_ID)
-    .select("id");
+    .delete({ count: "exact" })
+    .neq("id", NEVER_ID);
   if (error) throw error;
-  return (data ?? []).length;
+  return Math.max(0, count ?? 0);
 }
 
 export async function DELETE() {

@@ -17,19 +17,24 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   canonicalFeeSearch,
   classifyFeeDbError,
-  escapeFeeLike,
   isPaidStatus,
   normalizeDeleteIds,
-  normalizePpid,
   parseAmount,
-  ppidSearchKey,
+  ppidFuzzyPattern,
   toFeeRekapRow,
 } from "@/core/services/feeRekapService";
 
 export const dynamic = "force-dynamic";
 
-const DEFAULT_PAGE_SIZE = 2000;
-const MAX_PAGE_SIZE = 2000;
+const DEFAULT_PAGE_SIZE = 1000;
+/**
+ * Batas halaman MAKSIMAL = 1000 — SELARAS dengan `max_rows = 1000`
+ * PostgREST (supabase/config.toml:18; default hosting sama). Respons di
+ * atas itu DIPOTONG DIAM-DIAM oleh server (tanpa error), sehingga
+ * pageSize lebih besar membuat baris >1000 tak terjangkau + matematika
+ * halaman klien kacau. Jangan naikkan tanpa menaikkan max_rows dulu.
+ */
+const MAX_PAGE_SIZE = 1000;
 /** Batch baca fallback paginasi (agregasi lengkap tanpa batas 5000). */
 const SUMMARY_FALLBACK_BATCH = 1000;
 
@@ -210,7 +215,6 @@ export async function GET(req: Request) {
         qPpid,
         qNama,
         rawQ,
-        exactPpid: normalizePpid(rawQ),
         periode,
         page,
         pageSize,
@@ -227,7 +231,7 @@ export async function GET(req: Request) {
       if (c.code !== "MIGRATION_MISSING") throw e;
     }
     return NextResponse.json(
-      await queryLegacy(admin, { qPpid, qNama, periode, page, pageSize })
+      await queryLegacy(admin, { qPpid, qNama, rawQ, periode, page, pageSize })
     );
   } catch (e) {
     // 500 generik (mis. tabel belum dimigrasi) dipetakan menjadi pesan
@@ -256,7 +260,6 @@ interface ProfilQuery {
   qPpid: string;
   qNama: string;
   rawQ: string;
-  exactPpid: string;
   periode: string;
   page: number;
   pageSize: number;
@@ -275,18 +278,17 @@ interface ProfilListResult {
 }
 
 /** Bangun kondisi OR pencarian (persis + substring + fuzzy hyphen). */
-function profilOrs(
-  qPpid: string,
-  qNama: string,
-  rawQ: string,
-  exactPpid: string
-): string[] {
+function profilOrs(qPpid: string, qNama: string, rawQ: string): string[] {
   const ors: string[] = [];
   if (qPpid !== "") ors.push(`ppid.ilike.%${qPpid}%`);
   if (qNama !== "") ors.push(`nama_loket.ilike.%${qNama}%`);
-  const keyFree = ppidSearchKey(rawQ);
-  if (keyFree !== "" && keyFree !== exactPpid) {
-    ors.push(`ppid.like.%${escapeFeeLike(keyFree).split("").join("%")}%`);
+  // Selalu sertakan pola hyphen-insensitive (ilike, bukan like):
+  // ilike persis gagal bila salah satu sisi memakai "-" (query tanpa
+  // hubung vs DB berhubung atau sebaliknya). Recall luas, presisi
+  // dipilih di JS.
+  const fuzzy = ppidFuzzyPattern(rawQ);
+  if (fuzzy !== null) {
+    ors.push(`ppid.ilike.${fuzzy}`);
   }
   return ors;
 }
@@ -301,7 +303,7 @@ async function queryProfiles(
   admin: SupabaseClient,
   q: ProfilQuery
 ): Promise<ProfilListResult | null> {
-  const ors = profilOrs(q.qPpid, q.qNama, q.rawQ, q.exactPpid);
+  const ors = profilOrs(q.qPpid, q.qNama, q.rawQ);
   let query = admin.from("loket_profiles").select(PROFIL_COLUMNS, {
     count: "exact",
   });
@@ -409,7 +411,7 @@ async function summarizeProfiles(admin: SupabaseClient): Promise<FeeSummary> {
  */
 async function queryLegacy(
   admin: SupabaseClient,
-  q: { qPpid: string; qNama: string; periode: string; page: number; pageSize: number }
+  q: { qPpid: string; qNama: string; rawQ: string; periode: string; page: number; pageSize: number }
 ): Promise<ProfilListResult> {
   let query = admin
     .from("fee_loket")
@@ -423,6 +425,10 @@ async function queryLegacy(
   const ors: string[] = [];
   if (q.qPpid !== "") ors.push(`ppid.ilike.%${q.qPpid}%`);
   if (q.qNama !== "") ors.push(`nama_loket.ilike.%${q.qNama}%`);
+  const legacyFuzzy = ppidFuzzyPattern(q.rawQ);
+  if (legacyFuzzy !== null) {
+    ors.push(`ppid.ilike.${legacyFuzzy}`);
+  }
   if (ors.length > 0) {
     query = query.or(ors.join(","));
   }

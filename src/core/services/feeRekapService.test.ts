@@ -22,10 +22,15 @@ import {
   filterFeeRows,
   FEE_DELETE_MAX_IDS,
   fetchFeeList,
+  isCariSheetMatrix,
+  isNontrivialFullParse,
+  isPpidLike,
   isProfilDbRow,
   normalizeImportProfil,
   normalizeLoketStatusInput,
+  parseCariSheet,
   parseLoketBsbFull,
+  parseUniversalFeeRows,
   resolveTanggalTransfer,
   selectFeeSheet,
   slipImageFilename,
@@ -44,6 +49,7 @@ import {
   normalizeHeaderCell,
   normalizePpid,
   paginateRows,
+  ppidFuzzyPattern,
   ppidSearchKey,
   toFeeDbRow,
   parseAmount,
@@ -51,12 +57,14 @@ import {
   parseFeeRowsFromAOA,
   parseLoketBsbRows,
   periodeOptions,
+  runBatchesIsolated,
   sanitizeFeeSearch,
   saveFeeImport,
   splitIntoChunks,
   toAbsoluteAmount,
   toFeeRekapRow,
   toUploadLog,
+  verifyFeeImport,
   type FeeRekapRow,
   type LoketProfileFull,
 } from "./feeRekapService";
@@ -808,6 +816,37 @@ describe("getSelectedLoketData + displayNamaLoket", () => {
     expect(displayNamaLoket({ namaLoket: "  ", ppid: "P1" })).toBe("P1");
     expect(displayNamaLoket({ namaLoket: "Agen X", ppid: "P1" })).toBe("Agen X");
   });
+
+  it("hyphen-insensitive: hubung di satu sisi tetap cocok", () => {
+    const rows = MOCK_FEE_DATA.map((r) =>
+      r.ppid === "SBPOS-CKM-001" ? { ...r, ppid: "SBPOSCKM001" } : r
+    );
+    // Query berhubung vs DB tanpa hubung.
+    expect(getSelectedLoketData(rows, "SBPOS-CKM-001", "SEMUA")[0]?.ppid).toBe(
+      "SBPOSCKM001"
+    );
+    // Query tanpa hubung + lowercase + spasi vs DB berhubung.
+    expect(
+      getSelectedLoketData(MOCK_FEE_DATA, " sbposckm001 ", "SEMUA")[0]?.ppid
+    ).toBe("SBPOS-CKM-001");
+    // Kode solicitous dua arah hyphen.
+    expect(
+      getSelectedLoketData(MOCK_FEE_DATA, "53BSPA23075BDGWN", "SEMUA")
+    ).toHaveLength(0); // tidak ada di mock -> tetap 0, bukan error
+  });
+
+  it("ppidFuzzyPattern: pola ilike hyphen-insensitive", () => {
+    expect(ppidFuzzyPattern("SBPOS-CKM-001")).toBe(
+      "%S%B%P%O%S%C%K%M%0%0%1%"
+    );
+    // Query tanpa hubung menghasilkan pola yang cocok untuk DB
+    // berhubung maupun tidak (huruf berurutan, % menelan "-").
+    expect(ppidFuzzyPattern("sbposckm001")).toBe(
+      "%S%B%P%O%S%C%K%M%0%0%1%"
+    );
+    expect(ppidFuzzyPattern("")).toBeNull();
+    expect(ppidFuzzyPattern("   ")).toBeNull();
+  });
 });
 
 describe("normalisasi PPID kanonis (anti 'tidak ditemukan')", () => {
@@ -999,6 +1038,213 @@ describe("saveFeeImport chunked", () => {
     await expect(
       saveFeeImport({ rows: makeRows(600), fileName: "x.xlsx", periode: "2026-09" })
     ).rejects.toThrow(/batch 1\/2/);
+  });
+
+  it("retry chunk 5xx/429 hingga 3x lalu sukses (idempoten, tanpa duplikat hitung)", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        if (calls <= 2) {
+          return { ok: false, status: 503, json: async () => ({ error: "sibuk" }) };
+        }
+        return {
+          ok: true,
+          json: async () => ({
+            upserted: 2,
+            periode: "2026-09",
+            receivedSum: 0,
+            storedSum: 0,
+            zeroRows: 0,
+            profilesUpserted: 0,
+            detailsUpserted: 0,
+          }),
+        };
+      })
+    );
+    const result = await saveFeeImport({
+      rows: makeRows(2),
+      fileName: "retry.xlsx",
+      periode: "2026-09",
+    });
+    expect(result.upserted).toBe(2);
+    expect(calls).toBe(3);
+  });
+
+  it("error 4xx TIDAK di-retry (langsung throw 1x panggil)", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return { ok: false, status: 400, json: async () => ({ error: "rows invalid" }) };
+      })
+    );
+    await expect(
+      saveFeeImport({ rows: makeRows(2), fileName: "bad.xlsx", periode: "2026-09" })
+    ).rejects.toThrow(/rows invalid/);
+    expect(calls).toBe(1);
+  });
+
+  it("jaringan putus 3x -> throw dengan saran simpan ulang", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      })
+    );
+    await expect(
+      saveFeeImport({ rows: makeRows(2), fileName: "net.xlsx", periode: "2026-09" })
+    ).rejects.toThrow(/simpan ulang/);
+  });
+
+  it("tabular masif: 500 baris + selingan kosong + ekor kosong tak ada yang hilang", () => {
+    const header = ["NO", "PPID", "NAMA LOKET", "JUMLAH FEE"];
+    const matrix: unknown[][] = [header];
+    const want: string[] = [];
+    for (let i = 0; i < 500; i += 1) {
+      const ppid = `PP${String(i).padStart(4, "0")}`;
+      want.push(ppid);
+      matrix.push([i + 1, ppid, `Loket ${i}`, 100000 + i]);
+      if (i % 50 === 0) matrix.push(["", "", "", ""]);
+    }
+    matrix.push(["", "", "", ""], []);
+    const parsed = parseFeeRowsFromAOA(matrix, "2026-09", "masif");
+    const got = new Set(parsed.rows.map((r) => r.ppid));
+    expect(got.size).toBe(500);
+    for (const ppid of want) expect(got.has(ppid)).toBe(true);
+  });
+});
+
+describe("runBatchesIsolated", () => {
+  it("sukses penuh lintas batch konkuren: semua terhitung tepat sekali", async () => {
+    const seen: string[][] = [];
+    const out = await runBatchesIsolated(
+      Array.from({ length: 10 }, (_, i) => `P${i}`),
+      {
+        batchSize: 3,
+        concurrency: 4,
+        table: "t",
+        keyOf: (r) => r,
+        upsertBatch: async (batch) => {
+          seen.push([...batch]);
+        },
+        upsertOne: async () => {},
+        issues: [],
+      }
+    );
+    expect(out).toEqual({ succeeded: 10, failedIds: [] });
+    expect(seen.flat().sort()).toEqual(
+      Array.from({ length: 10 }, (_, i) => `P${i}`).sort()
+    );
+  });
+
+  it("batch gagal 2x -> fallback per baris mengisolasi baris busuk", async () => {
+    const issues: { batch: number; table: string; message: string }[] = [];
+    const oneCalls: string[] = [];
+    const out = await runBatchesIsolated(["A", "BAD", "C"], {
+      batchSize: 3,
+      concurrency: 1,
+      table: "fee_loket",
+      keyOf: (r) => r,
+      upsertBatch: async (batch) => {
+        if (batch.includes("BAD")) throw new Error("constraint boom");
+      },
+      upsertOne: async (row) => {
+        oneCalls.push(row);
+        if (row === "BAD") throw new Error("constraint boom");
+      },
+      issues,
+    });
+    expect(out.succeeded).toBe(2);
+    expect(out.failedIds).toEqual(["BAD"]);
+    expect(oneCalls.sort()).toEqual(["A", "BAD", "C"]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({ batch: 1, table: "fee_loket" });
+  });
+
+  it("transien (gagal 1x) sembuh via retry tanpa fallback baris", async () => {
+    let batchCalls = 0;
+    let oneCalls = 0;
+    const out = await runBatchesIsolated(["A", "B"], {
+      batchSize: 2,
+      concurrency: 2,
+      table: "t",
+      keyOf: (r) => r,
+      upsertBatch: async () => {
+        batchCalls += 1;
+        if (batchCalls === 1) throw new Error("timeout transien");
+      },
+      upsertOne: async () => {
+        oneCalls += 1;
+      },
+      issues: [],
+    });
+    expect(out).toEqual({ succeeded: 2, failedIds: [] });
+    expect(batchCalls).toBe(2);
+    expect(oneCalls).toBe(0);
+  });
+
+  it("kosong: tanpa panggilan, tanpa isu", async () => {
+    let calls = 0;
+    const out = await runBatchesIsolated([], {
+      table: "t",
+      keyOf: (r: string) => r,
+      upsertBatch: async () => {
+        calls += 1;
+      },
+      upsertOne: async () => {
+        calls += 1;
+      },
+      issues: [],
+    });
+    expect(out).toEqual({ succeeded: 0, failedIds: [] });
+    expect(calls).toBe(0);
+  });
+});
+
+describe("verifyFeeImport", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("sukses: teruskan found/missing dari server", async () => {
+    const seen: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init: { body?: string }) => {
+        seen.push(JSON.parse(String(init.body)));
+        return {
+          ok: true,
+          json: async () => ({
+            success: true,
+            periode: "2026-09",
+            total: 3,
+            found: 2,
+            missingCount: 1,
+            missing: ["PP3"],
+          }),
+        };
+      })
+    );
+    const result = await verifyFeeImport(["PP1", "PP2", "PP3"], "2026-09");
+    expect(result).toMatchObject({ total: 3, found: 2, missingCount: 1 });
+    expect(result.missing).toEqual(["PP3"]);
+    expect(seen[0]).toMatchObject({ periode: "2026-09" });
+  });
+
+  it("respons tak valid / gagal -> throw", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => ({ aneh: 1 }) }))
+    );
+    await expect(verifyFeeImport(["PP1"], "2026-09")).rejects.toThrow();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: false, json: async () => ({ error: "x" }) }))
+    );
+    await expect(verifyFeeImport(["PP1"], "2026-09")).rejects.toThrow();
   });
 });
 
@@ -1294,6 +1540,270 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
     expect(lines[lines.length - 1]).toBe("TOTAL\t56\t\t114800");
   });
 
+  // Fixture meniru sheet `Cari` asli: blok form kiri (C=label, D=":",
+  // E=nilai) + tabel modul (K-N). Indeks 0-based: label col 2,
+  // nilai col 4, modul col 10-13.
+  function cariMatrix(ppid: string): unknown[][] {
+    const blank = (): unknown[] => Array(20).fill("");
+    const m: unknown[][] = [blank(), blank(), blank()];
+    m.push(["", "", "", "", "", "", "", "", "", "", "MODUL", "LEMBAR", "FEE / LEMBAR", "TOTAL FEE", "", "", "", "", "", ""]);
+    m.push(["", "", "", "", "", "", "", "", "", "", "PLN Postpaid", 56, 2050, 114800, "", "", "", "", "", ""]);
+    m.push(["", "", "PPID", ":", ppid, "", "", "", "", "", "PLN Prepaid", 0, 0, 0, "", "", "", "", "", ""]);
+    m.push(["", "", "Nama Loket", ":", "Kios Berkah", "", "", "", "", "", "PBB", 3, 3000, 9000, "", "", "", "", "", ""]);
+    m.push(["", "", "Nomor Rekening", ":", "12345", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Rekening BANK", ":", "BANK X", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Pemilik Rekening", ":", "Budi", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Fee Bulan Ini", ":", 1000000, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Fee Bulan Sebelumnya", ":", 200000, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Subsidi Antar Loket", ":", 50000, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Minus Loket", ":", 10000, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Status Fee", ":", "Belum di Transfer", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Fee ke Deposit", ":", 0, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Fee di Transfer ke Rek.", ":", 0, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "Fee Siap Transfer", ":", 1240000, "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
+    return m;
+  }
+
+  it("isCariSheetMatrix: form Cari vs tabel generik", () => {
+    expect(isCariSheetMatrix(cariMatrix("SBPOS-CKM-001"))).toBe(true);
+    expect(
+      isCariSheetMatrix([
+        ["PPID", "NAMA LOKET", "TOTAL FEE"],
+        ["X1", "Kios", 100],
+      ])
+    ).toBe(false);
+    expect(isCariSheetMatrix([])).toBe(false);
+  });
+
+  it("parseCariSheet: profil + rincian Master dari form terisi", () => {
+    const parsed = parseCariSheet(cariMatrix("sbpos-ckm-001"), "2026-08", "f");
+    expect(parsed).not.toBeNull();
+    const row = parsed!.row;
+    expect(row.ppid).toBe("SBPOS-CKM-001");
+    expect(row.periode).toBe("2026-08");
+    expect(row.totalFee).toBe(1250000);
+    expect(row.profil?.namaLoket).toBe("Kios Berkah");
+    expect(row.profil?.noRekening).toBe("12345");
+    expect(row.profil?.feeSiapTransfer).toBe(1240000);
+    // Rincian sparse: modul nol dibuang, aktif dipertahankan.
+    expect(row.profil?.details).toEqual([
+      { modul: "PLN Postpaid", lembar: 56, feePerLembar: 2050, total: 114800 },
+      { modul: "PBB", lembar: 3, feePerLembar: 3000, total: 9000 },
+    ]);
+  });
+
+  it("parseCariSheet: template kosong (PPID kosong) -> null, bukan error", () => {
+    expect(parseCariSheet(cariMatrix(""), "2026-08", "f")).toBeNull();
+    expect(parseCariSheet(cariMatrix("   "), "2026-08", "f")).toBeNull();
+  });
+
+  it("parseCariSheet: input E3 (Masukan PPID) dibaca bila E6 kosong", () => {
+    const m = cariMatrix("");
+    m[2] = ["", "", "Masukan PPID / Kode", ":", "SBPOS-PWK-027"];
+    const parsed = parseCariSheet(m, "2026-09", "h");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.row.ppid).toBe("SBPOS-PWK-027");
+  });
+
+  it("parseCariSheet: E3 kosong tidak menutupi E6 yang terisi", () => {
+    const m = cariMatrix("SBPOS-CKM-001");
+    m[2] = ["", "", "Masukan PPID / Kode", ":", ""];
+    const parsed = parseCariSheet(m, "2026-08", "h");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.row.ppid).toBe("SBPOS-CKM-001");
+  });
+
+  it("kunci query stabil untuk PPID solicit (53BSPA09884JBKTK)", () => {
+    // Regresi: PPID dari sheet Cari harus dinormalisasi identik di
+    // sisi impor (normalizePpid) dan sisi query (canonicalFeeSearch)
+    // agar lookup exact menemukan baris tersimpan.
+    expect(normalizePpid(" 53bspa09884jbktk ")).toBe("53BSPA09884JBKTK");
+    const q = canonicalFeeSearch("53bspa09884jbktk");
+    expect(q.ppid).toBe(normalizePpid("53BSPA09884JBKTK"));
+    expect(q.ppid).not.toBe("");
+  });
+
+  it("parseCariSheet: varian posisi (PPID di E4, tabel modul bergeser)", () => {
+    // Varian: label PPID di baris indeks 3 (sel input E4), tabel modul
+    // di kolom H-K (indeks 7-10) — parser wajib resolusi dari label.
+    const blank = (): unknown[] => Array(20).fill("");
+    const m: unknown[][] = [blank(), blank(), blank()];
+    m.push(["", "", "PPID", ":", "SBPOS-PWK-027"]);
+    m.push(["", "", "Nama Loket", ":", "Loket Maju Jaya"]);
+    m.push(["", "", "", "", "", "", "", "MODUL", "LEMBAR", "FEE/LEMBAR", "TOTAL FEE"]);
+    m.push(["", "", "Fee Bulan Ini", ":", 2100750, "", "", "PLN Postpaid", 10, 2000, 20000]);
+    m.push(["", "", "Fee Bulan Sebelumnya", ":", 0, "", "", "PBB", 0, 0, 0]);
+    m.push(["", "", "Keterangan", ":", "lunas", "", "", "", "", "", ""]);
+    m.push(["", "", "", "", "", "", "", "", "", "", ""]);
+    m.push(["", "", "", "", "", "", "", "FIF", 2, 1500, 3000]);
+    expect(isCariSheetMatrix(m)).toBe(true);
+    const parsed = parseCariSheet(m, "2026-09", "g");
+    expect(parsed).not.toBeNull();
+    expect(parsed!.row.ppid).toBe("SBPOS-PWK-027");
+    expect(parsed!.row.totalFee).toBe(2100750);
+    expect(parsed!.row.profil?.details).toEqual([
+      { modul: "PLN Postpaid", lembar: 10, feePerLembar: 2000, total: 20000 },
+      { modul: "FIF", lembar: 2, feePerLembar: 1500, total: 3000 },
+    ]);
+  });
+
+  it("e2e Cari: form terisi -> body saveFeeImport memuat profil+rincian -> baris DB utuh", async () => {
+    const parsed = parseCariSheet(cariMatrix("SBPOS-CKM-001"), "2026-08", "e2e");
+    expect(parsed).not.toBeNull();
+    const bodies: { rows: Record<string, unknown>[] }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init?: { body?: unknown }) => {
+        bodies.push(init?.body ? JSON.parse(String(init.body)) : { rows: [] });
+        return {
+          ok: true,
+          json: async () => ({
+            upserted: 1,
+            periode: "2026-08",
+            receivedSum: 0,
+            storedSum: 0,
+            zeroRows: 0,
+            profilesUpserted: 1,
+            detailsUpserted: 2,
+          }),
+        };
+      })
+    );
+    try {
+      const result = await saveFeeImport(
+        { rows: [parsed!.row], fileName: "cari.xlsx", periode: "2026-08" }
+      );
+      expect(result.upserted).toBe(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    // 1) Payload client membawa profil + rincian (bukan legacy polos).
+    const sent = bodies[0]?.rows[0] as unknown as Record<string, unknown>;
+    expect(sent).toMatchObject({ ppid: "SBPOS-CKM-001" });
+    expect(sent).toHaveProperty("profil");
+    expect(sent.details).toHaveLength(2);
+    // 2) Mapping server menghasilkan baris DB fee + profil + details utuh.
+    expect(toFeeDbRow(sent, "2026-08")).not.toBeNull();
+    const dbProfil = normalizeImportProfil(sent, "2026-08");
+    expect(dbProfil?.profil).toMatchObject({
+      ppid: "SBPOS-CKM-001",
+      periode: "2026-08",
+    });
+    expect(
+      dbProfil?.details.map((d) => d.modul_nama).sort()
+    ).toEqual(["PBB", "PLN Postpaid"]);
+  });
+
+  it("isPpidLike: kode PPID vs header/nominal/tanggal", () => {
+    expect(isPpidLike("SBPOS-CKM-001")).toBe(true);
+    expect(isPpidLike("53BSPA09884JBKTK")).toBe(true);
+    expect(isPpidLike("12BSPA19010BDLMH")).toBe(true);
+    expect(isPpidLike("PPID")).toBe(false);
+    expect(isPpidLike("MODUL")).toBe(false);
+    expect(isPpidLike("114800")).toBe(false);
+    expect(isPpidLike("2026-09-22")).toBe(false);
+    expect(isPpidLike("XL (2)")).toBe(false);
+    expect(isPpidLike("")).toBe(false);
+    expect(isPpidLike(null)).toBe(false);
+  });
+
+  it("parseUniversalFeeRows: tanpa header, baris PPID terekstrak, sampah tidak", () => {
+    const matrix: unknown[][] = [
+      ["DATA LOKET WILAYAH TIMUR"],
+      ["53BSPA09884JBKTK", "Kios Berkah Jaya", 1250000],
+      ["SBPOS-CKM-001", 750000, "Agen Barokah"],
+      ["KETERANGAN", "rekap penutup"],
+      ["PPH 23 POS", 0, 0],
+      ["NO", 1, 2],
+      ["", "", ""],
+    ];
+    const { rows, skipped } = parseUniversalFeeRows(matrix, "2026-08", "u");
+    expect(rows.map((r) => r.ppid).sort()).toEqual([
+      "53BSPA09884JBKTK",
+      "SBPOS-CKM-001",
+    ]);
+    expect(rows[0]).toMatchObject({ namaLoket: "Kios Berkah Jaya", totalFee: 1250000 });
+    expect(rows[1]).toMatchObject({ namaLoket: "Agen Barokah", totalFee: 750000 });
+    // PPH tanpa nominal + baris nomor/tanggal/kosong dilewati.
+    expect(skipped).toBe(1);
+    expect(rows.every((r) => r.periode === "2026-08")).toBe(true);
+  });
+
+  it("isNontrivialFullParse: guard generalisasi tabular massal", () => {
+    expect(isNontrivialFullParse(null)).toBe(false);
+    expect(
+      isNontrivialFullParse({ profiles: [], rows: [], skipped: 0 })
+    ).toBe(false);
+    // Rp-0 massal tanpa rincian -> tolak (lanjut dinamis).
+    expect(
+      isNontrivialFullParse({
+        profiles: [],
+        rows: [
+          {
+            id: "x-1",
+            ppid: "PP1",
+            namaLoket: "L1",
+            periode: "2026-08",
+            totalFee: 0,
+            status: "PENDING" as const,
+            rincian: [],
+            updatedAt: "",
+          },
+        ],
+        skipped: 0,
+      })
+    ).toBe(false);
+    // Fee non-nol ATAU rincian ada -> pakai jalur Master.
+    const row = {
+      id: "x-1",
+      ppid: "PP1",
+      namaLoket: "L1",
+      periode: "2026-08",
+      totalFee: 100,
+      status: "PENDING" as const,
+      rincian: [],
+      updatedAt: "",
+    };
+    expect(
+      isNontrivialFullParse({ profiles: [], rows: [row], skipped: 0 })
+    ).toBe(true);
+    expect(
+      isNontrivialFullParse({
+        profiles: [
+          {
+            ppid: "PP1",
+            namaLoket: "L1",
+            bank: "",
+            noRekening: "",
+            namaPemilik: "",
+            rekomender: "",
+            elektrikArea: "",
+            periode: "2026-08",
+            feeBulanIni: 0,
+            feeBulanSebelumnya: 0,
+            subsidiAntarLoket: 0,
+            totalFee: 0,
+            minus: 0,
+            hold: 0,
+            potonganLainnya: 0,
+            potonganOngkir: 0,
+            totalFeeTransfer: 0,
+            feeKeDeposit: 0,
+            feeTransferRekening: 0,
+            sisaFee: 0,
+            keterangan: "",
+            tanggalTransfer: "",
+            feeSiapTransfer: 0,
+            statusPembayaran: "PENDING" as const,
+            details: [{ modul: "PBB", lembar: 1, feePerLembar: 1, total: 1 }],
+          },
+        ],
+        rows: [{ ...row, totalFee: 0 }],
+        skipped: 0,
+      })
+    ).toBe(true);
+  });
+
   it("parseLoketBsbFull: identitas + keuangan + rincian + status", () => {
     const parsed = parseLoketBsbFull(masterMatrix(), "2026-08", "master");
     expect(parsed).not.toBeNull();
@@ -1420,6 +1930,70 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
     expect(normalized?.profil).toMatchObject({ ppid: "P1", periode: "2026-08" });
     expect(normalized?.details).toHaveLength(1);
     expect(normalizeImportProfil({ ppid: "P1" }, "2026-08")).toBeNull();
+  });
+
+  it("multi-sheet: Master + Cari + dinamis + duplikat + kosong -> tak ada PPID valid hilang", () => {
+    // Mensimulasikan gabungan preview lintas sheet (Loket BSB, Cari,
+    // tabel dinamis) persis sebelum saveFeeImport + mapping API.
+    const payload = [
+      {
+        ppid: "PP-BSB",
+        namaLoket: "Loket BSB",
+        periode: "2026-08",
+        total_fee: 1000,
+        status: "TERBAYAR",
+        rincian: [],
+        profil: { ppid: "PP-BSB", namaLoket: "Loket BSB", feeBulanIni: 1000 },
+        details: [
+          { modul: "PLN Postpaid", lembar: 2, feePerLembar: 2050, total: 4100 },
+        ],
+      },
+      {
+        ppid: "PP-CARI",
+        namaLoket: "Loket Cari",
+        periode: "2026-08",
+        total_fee: 500,
+        status: "PENDING",
+        rincian: [],
+        profil: { ppid: "PP-CARI", namaLoket: "Loket Cari", feeBulanIni: 500 },
+        details: [{ modul: "PBB", lembar: 1, feePerLembar: 3000, total: 3000 }],
+      },
+      {
+        ppid: "PP-DYN",
+        namaLoket: "Loket Dinamis",
+        periode: "2026-08",
+        total_fee: 200,
+        status: "PENDING",
+        rincian: [],
+      },
+      { ppid: "pp-bsb", namaLoket: "Duplikat BSB", periode: "2026-08", total_fee: 1, status: "PENDING", rincian: [] },
+      { ppid: "   ", namaLoket: "Tanpa PPID", periode: "2026-08", total_fee: 999, status: "PENDING", rincian: [] },
+    ];
+    // 1) toFeeDbRow: hanya baris tanpa-PPID yang null.
+    const mapped = payload.map((r) => toFeeDbRow(r, "2026-08"));
+    expect(mapped.filter(Boolean)).toHaveLength(4);
+    // 2) Dedup gaya API (ppid||periode, terakhir menang).
+    const byKey = new Map<string, unknown>();
+    for (const m of mapped) {
+      if (!m) continue;
+      byKey.set(`${m.ppid}||${m.periode}`, m);
+    }
+    expect([...byKey.keys()].sort()).toEqual([
+      "PP-BSB||2026-08",
+      "PP-CARI||2026-08",
+      "PP-DYN||2026-08",
+    ]);
+    // 3) Profil + rincian Master/Cari lolos utuh (kasus PPID dinamis
+    //    tanpa profil -> null, ditangani sebagai legacy oleh API).
+    const profBsb = normalizeImportProfil(payload[0] as never, "2026-08");
+    expect(profBsb?.profil.ppid).toBe("PP-BSB");
+    expect(profBsb?.details).toHaveLength(1);
+    expect(profBsb?.details[0]).toMatchObject({ modul_nama: "PLN Postpaid" });
+    const profCari = normalizeImportProfil(payload[1] as never, "2026-08");
+    expect(profCari?.profil.ppid).toBe("PP-CARI");
+    expect(profCari?.details).toHaveLength(1);
+    expect(profCari?.details[0]).toMatchObject({ modul_nama: "PBB" });
+    expect(normalizeImportProfil(payload[2] as never, "2026-08")).toBeNull();
   });
 
   it("buildCariSlipText: slip keuangan + rincian modul", () => {

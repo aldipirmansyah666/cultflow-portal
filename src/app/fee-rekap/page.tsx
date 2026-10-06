@@ -50,6 +50,7 @@ import {
   buildFullModuleBreakdown,
   buildPeriode,
   buildRincianText,
+  cariValueFromRow,
   deleteFeeRows,
   detectFeeHeader,
   displayNamaLoket,
@@ -63,14 +64,20 @@ import {
   formatPeriode,
   formatRupiah,
   getSelectedLoketData,
+  isCariSheetMatrix,
+  isNontrivialFullParse,
+  normalizeHeaderCell,
   paginateRows,
+  parseCariSheet,
   parseFeeRowsFromAOA,
   parseLoketBsbFull,
   parseLoketBsbRows,
+  parseUniversalFeeRows,
   saveFeeImport,
   selectFeeSheet,
   slipImageFilename,
   statusLabelCari,
+  verifyFeeImport,
   type FeeParseAudit,
   type FeeSheetTarget,
   type FeeAgentProfile,
@@ -123,6 +130,73 @@ function formatDateTime(value: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(d);
+}
+
+/** Transparansi ekstraksi per sheet untuk panel diagnostik upload. */
+interface SheetDebugInfo {
+  name: string;
+  rows: number;
+  cols: number;
+  kind: string;
+  /** PPID terbaca (form Cari) atau null bila template kosong. */
+  ppid?: string | null;
+  /** Potret mentah sel input PPID form Cari (E3 / E6). */
+  e3?: string;
+  e6?: string;
+  /** Baris header modul Cari (1-based) bila relevan. */
+  headerRow?: number | null;
+  added: number;
+  skipped: number;
+  /** Sampel baris mentah (maks 6 x 20 sel, dipangkas 80 char/sel). */
+  sampleRows: string[][];
+}
+
+/** Pratinjau JSON-aman satu sel untuk diagnostik (maks 80 char). */
+function previewCellValue(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (v instanceof Date) return v.toISOString();
+  const s = typeof v === "string" ? v : (JSON.stringify(v) ?? "null");
+  return s.length > 80 ? `${s.slice(0, 80)}…` : s;
+}
+
+/** Sampel baris mentah matriks (dibatasi agar JSON diagnostik ringan). */
+function sampleRawRows(
+  matrix: unknown[][],
+  maxRows = 6,
+  maxCols = 20
+): string[][] {
+  return matrix.slice(0, maxRows).map((r) =>
+    Array.isArray(r) ? r.slice(0, maxCols).map(previewCellValue) : []
+  );
+}
+
+/** Potret mentah sel input PPID form Cari (label E3 vs E6). */
+function snapshotCariInputs(matrix: unknown[][]): {
+  e3: string;
+  e6: string;
+} {
+  let e3 = "null";
+  let e6 = "null";
+  for (const row of matrix.slice(0, 16)) {
+    if (!Array.isArray(row)) continue;
+    for (let c = 0; c <= 8 && c < row.length; c += 1) {
+      const label = normalizeHeaderCell(row[c]);
+      if (
+        label !== "masukan ppid kode" &&
+        label !== "masukan ppid" &&
+        label !== "ppid"
+      ) {
+        continue;
+      }
+      const v = previewCellValue(cariValueFromRow(row, c));
+      if (label === "ppid") {
+        if (e6 === "null") e6 = v;
+      } else if (e3 === "null") {
+        e3 = v;
+      }
+    }
+  }
+  return { e3, e6 };
 }
 
 /** Satu baris slip "Label : Nilai" ala sheet Cari (kolom C:D:E). */
@@ -366,7 +440,7 @@ export default function FeeRekapPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [logs, setLogs] = useState<UploadLog[]>([]);
   const [logsError, setLogsError] = useState<string | null>(null);
-  // Batas halaman server: true bila DB menyimpan baris di luar 2000 yang
+  // Batas halaman server: true bila DB menyimpan baris di luar 1000 yang
   // dimuat (peringatan anti-pemotongan-diam, lihat `truncated` API).
   const [listTruncated, setListTruncated] = useState(false);
   const [listTotal, setListTotal] = useState(0);
@@ -395,6 +469,11 @@ export default function FeeRekapPage() {
     size: number;
     sheet?: string;
     headerRow?: number;
+    /** Rincian per sheet: nama + baris baru yang disumbang (gabung dedup). */
+    sheets?: { name: string; rows: number }[];
+    skipped?: number;
+    /** Transparansi ekstraksi mentah per sheet (lihat SheetDebugInfo). */
+    sheetsDebug?: SheetDebugInfo[];
   } | null>(null);
   const [parsing, setParsing] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -466,7 +545,7 @@ export default function FeeRekapPage() {
     setListError(null);
     try {
       const [list, logList] = await Promise.all([
-        fetchFeeList({ pageSize: 2000 }),
+        fetchFeeList({ pageSize: 1000 }),
         fetchUploadLogs().catch(() => {
           setLogsError("Riwayat tak termuat.");
           return [] as UploadLog[];
@@ -909,126 +988,374 @@ export default function FeeRekapPage() {
           matrix: ws ? fillMergedCells(raw, getMergeRanges(ws)) : raw,
         });
       }
-      let hit: { name: string; matrix: unknown[][] } | undefined;
-      let hitTarget: FeeSheetTarget | undefined;
+      // MULTI-SHEET: parse SEMUA sheet yang header fee-nya valid (maks 10
+      // dipindai di atas), bukan hanya satu. Urutan: sheet target
+      // "Loket BSB" dulu (jalur Master terkaya: profil + 79 rincian modul),
+      // lalu sheet lain sebagai penambah PPID baru. Baris digabung dengan
+      // dedup PPID (Master menang; sheet lain hanya mengisi PPID yang
+      // belum ada) sehingga tidak ganda dan tidak ada data hilang.
+      // Sheet tanpa header fee valid (cover/kosong) dilewati diam-diam.
+      const hits: { name: string; matrix: unknown[][]; target?: FeeSheetTarget }[] = [];
       if (selection) {
         const candidate = scanned.find((s) => s.name === selection.name);
         if (
           candidate &&
           detectFeeHeader(candidate.matrix, selection.target) !== null
         ) {
-          hit = candidate;
-          hitTarget = selection.target;
+          hits.push({ ...candidate, target: selection.target });
         }
       }
-      hit ??= scanned.find((s) => detectFeeHeader(s.matrix) !== null);
-      if (!hit) {
+      for (const s of scanned) {
+        if (hits.some((h) => h.name === s.name)) continue;
+        // Sheet `Cari` (form lookup) ikut hits walau bukan tabel fee —
+        // cabang khusus di bawah yang mem-parsenya; parser dinamis
+        // TIDAK BOLEH menyentuhnya (label form jadi baris sampah).
+        if (
+          detectFeeHeader(s.matrix) !== null ||
+          isCariSheetMatrix(s.matrix)
+        )
+          hits.push(s);
+      }
+      // Jejak debug per sheet: klasifikasi layout + dimensi matriks.
+      // Buka DevTools Console (filter "fee-import") untuk menelusuri
+      // sheet mana menyumbang baris dan mana yang dilewati + alasannya.
+      // Rincian yang sama ditampilkan transparan di panel diagnostik UI.
+      const sheetDebug = new Map<string, SheetDebugInfo>();
+      for (const s of scanned) {
+        const rows = s.matrix.length;
+        const cols = Math.max(
+          0,
+          ...s.matrix.slice(0, 5).map((r) => (Array.isArray(r) ? r.length : 0))
+        );
+        const kind =
+          selection?.name === s.name
+            ? "target-BSB"
+            : isCariSheetMatrix(s.matrix)
+              ? "form-Cari"
+              : detectFeeHeader(s.matrix) !== null
+                ? "tabel-fee"
+                : "dilewati (tanpa header fee)";
+        console.debug(
+          `[fee-import] sheet "${s.name}": ${rows} baris x ${cols} kolom -> ${kind}`
+        );
+        sheetDebug.set(s.name, {
+          name: s.name,
+          rows,
+          cols,
+          kind,
+          added: 0,
+          skipped: 0,
+          sampleRows: sampleRawRows(s.matrix),
+        });
+      }
+      if (hits.length === 0) {
         const names = wb.sheetNames.slice(0, 10).join(", ");
         throw new Error(
           `Tidak ada baris fee terdeteksi di sheet mana pun (${names}). ` +
             "Pastikan salah satu sheet memuat header PPID + Nama Loket/Agen + Fee/Total."
         );
       }
-      // Inspektor sel mentah untuk audit formula: sel berformula tanpa
-      // nilai cache adalah akar Rp-0 massal yang khas pada .xlsb —
-      // terlihat berangka di Excel, terbaca "" oleh parser. Indeks
-      // matriks = alamat sheet (baris 1 -> indeks 0).
-      const hitWs = wb.worksheets.get(hit.name);
-      const inspectCell = (r: number, c: number) => {
-        if (!hitWs) return undefined;
-        return hasFormulaAt(hitWs, r, c) ? { hasFormula: true } : undefined;
-      };
       const fileLabel = file.name.replace(/\.[^.]+$/, "");
-      // Jalur MASTER untuk sheet Loket BSB: parser absolut penuh
-      // (parseLoketBsbFull) membaca identitas (1-7) + ringkasan keuangan
-      // (189-196) + rincian 79 modul per pola sheet `Cari`, sehingga
-      // "Simpan ke Database" mengisi loket_profiles + details sekaligus.
-      // Fallback ke parser dinamis/absolut lama bila sanity gagal.
-      const isBsbTarget = hitTarget?.sheetName === hit.name;
-      const full =
-        isBsbTarget
-          ? parseLoketBsbFull(
-              hit.matrix,
-              buildPeriode(bulan, tahun),
-              fileLabel
-            )
+      const periodeAktif = buildPeriode(bulan, tahun);
+      // Gabung lintas sheet: PPID pertama menang (Master/BSB dulu).
+      // Sheet terpecahkan (berkontribusi baris / form Cari tertangani)
+      // tidak di-scan ulang; sisanya menjadi sasaran jaring universal.
+      const resolvedSheets = new Set<string>();
+      // Gabung lintas sheet: PPID pertama menang (Master/BSB dulu).
+      const mergedByPpid = new Map<string, FeeRekapRow>();
+      const sheetSummaries: { name: string; rows: number }[] = [];
+      let skippedTotal = 0;
+      let auditRows = 0;
+      let auditZero = 0;
+      let auditFormula = 0;
+      let auditClamped = 0;
+      const auditSamples: FeeParseAudit["samples"] = [];
+      let primaryCols: {
+        ppid: string;
+        nama: string;
+        fee: string;
+        status: string;
+        periode: string;
+        potongan: string[];
+      } | null = null;
+      let primaryHeaderRow = 3;
+      let primaryName = "";
+
+      for (const hit of hits) {
+        // Inspektor sel mentah per sheet (merge/formula beda per sheet):
+        // sel berformula tanpa nilai cache adalah akar Rp-0 massal.
+        const hitWs = wb.worksheets.get(hit.name);
+        const inspectCell = (r: number, c: number) => {
+          if (!hitWs) return undefined;
+          return hasFormulaAt(hitWs, r, c) ? { hasFormula: true } : undefined;
+        };
+        // Jalur MASTER: sheet target "Loket BSB" + generalisasi tabular
+        // massal — sheet lain berlayout BSB (lolos sanity internal Full)
+        // ikut jalur Master bila hasilnya nontrivial (ada fee/rincian),
+        // agar rincian 79 modul tidak hilang hanya karena nama sheet
+        // beda. Fallthrough ke absolut/dinamis/Cari bila gagal.
+        const isBsbTarget = hit.target?.sheetName === hit.name;
+        let full = isBsbTarget
+          ? parseLoketBsbFull(hit.matrix, periodeAktif, fileLabel)
           : null;
-      if (full && full.rows.length > 0) {
-        const zeroFeeRows = full.rows.filter((x) => x.totalFee === 0).length;
-        setFileMeta({
-          name: file.name,
-          size: file.size,
-          sheet: hit.name,
-          headerRow: 3,
-        });
-        setPreview(full.rows);
-        setSkipped(full.skipped);
-        setDetectedCols({
-          ppid: "PPID",
-          nama: "Nama Loket",
-          fee: "JUMLAH FEE (191) / BULAN INI (189)",
-          status: "Total Transfer (206) → TERBAYAR/PENDING",
-          periode: buildPeriode(bulan, tahun),
-          potongan: ["MINUS (192)", "HOLD (193)", "Potongan lainnya (194)", "Potongan Ongkir (195)"],
-        });
-        setParseAudit({
-          totalRows: full.rows.length,
-          zeroFeeRows,
-          allZero: zeroFeeRows === full.rows.length,
-          formulaWithoutValue: 0,
-          clampedFeeRows: full.rows.filter((x) => x.auditFlag === "OVER_DEDUCTED_CLAMPED").length,
-          samples: full.rows.slice(0, 5).map((r, i) => ({
-            matrixRow: 5 + i,
-            ppid: r.ppid,
-            raw: r.totalFee,
-            parsed: r.totalFee,
-            hasFormula: false,
-          })),
-        });
-        return;
-      }
-      // Jalur MUTLAK untuk sheet Loket BSB: indeks kolom fix
-      // (PPID=1, Nama=2, fee=191/189), header indeks 2, data indeks 5.
-      // Fallback ke parser dinamis bila sanity header absolut gagal
-      // (return null) — plus pengaman template-drift:
-      // bila hasil absolut Rp-0 massal (indeks 191/189 tak lagi memuat
-      // nominal — mis. layout file berubah), coba parser dinamis pada
-      // matriks yang sama dan pakai hasilnya bila menemukan fee non-nol.
-      const runDynamic = () =>
-        parseFeeRowsFromAOA(
-          hit.matrix,
-          buildPeriode(bulan, tahun),
-          fileLabel,
-          hitTarget
-            ? {
-                headerRowHint: hitTarget.headerRowHint,
-                dataStartRowHint: hitTarget.dataStartRowHint,
-                columnHints: hitTarget.columnHints,
-                inspectCell,
+        if (!full && !isBsbTarget && !isCariSheetMatrix(hit.matrix)) {
+          const attempt = parseLoketBsbFull(hit.matrix, periodeAktif, fileLabel);
+          if (isNontrivialFullParse(attempt)) {
+            console.debug(
+              `[fee-import] sheet "${hit.name}": layout tabular massal ala BSB -> jalur Master`
+            );
+            full = attempt;
+          }
+        }
+        if (full && full.rows.length > 0) {
+            let added = 0;
+            for (const r of full.rows) {
+              if (!mergedByPpid.has(r.ppid)) {
+                mergedByPpid.set(r.ppid, r);
+                added += 1;
               }
-            : { inspectCell }
+            }
+            sheetSummaries.push({ name: hit.name, rows: added });
+            skippedTotal += full.skipped;
+            resolvedSheets.add(hit.name);
+            sheetDebug.set(hit.name, {
+              ...(sheetDebug.get(hit.name) as SheetDebugInfo),
+              added,
+              skipped: full.skipped,
+            });
+            console.debug(
+              `[fee-import] sheet "${hit.name}" (Master${isBsbTarget ? "-BSB" : "-tabular"}): ` +
+                `${full.rows.length} baris, +${added} baru, ${full.skipped} dilewati`
+            );
+            const zeroFeeRows = full.rows.filter((x) => x.totalFee === 0).length;
+            auditRows += full.rows.length;
+            auditZero += zeroFeeRows;
+            auditClamped += full.rows.filter(
+              (x) => x.auditFlag === "OVER_DEDUCTED_CLAMPED"
+            ).length;
+            const masterSamples = full.rows.slice(
+              0,
+              Math.max(0, 5 - auditSamples.length)
+            );
+            masterSamples.forEach((r, i) => {
+              auditSamples.push({
+                matrixRow: 5 + i,
+                ppid: r.ppid,
+                raw: r.totalFee,
+                parsed: r.totalFee,
+                hasFormula: false,
+              });
+            });
+            if (!primaryCols) {
+              primaryCols = {
+                ppid: "PPID",
+                nama: "Nama Loket",
+                fee: "JUMLAH FEE (191) / BULAN INI (189)",
+                status: "Total Transfer (206) → TERBAYAR/PENDING",
+                periode: periodeAktif,
+                potongan: ["MINUS (192)", "HOLD (193)", "Potongan lainnya (194)", "Potongan Ongkir (195)"],
+              };
+              primaryHeaderRow = 3;
+              primaryName = hit.name;
+            }
+            continue;
+          }
+        // Jalur FORM `Cari`: satu loket Master (profil + rincian modul
+        // dari cached VLOOKUP). BUKAN tabel — jangan pernah jatuh ke
+        // parser dinamis. PPID kosong = template belum diisi → lewati
+        // sheet diam-diam (bukan error).
+        if (!isBsbTarget && isCariSheetMatrix(hit.matrix)) {
+          const cari = parseCariSheet(hit.matrix, periodeAktif, fileLabel);
+          if (cari) {
+            let added = 0;
+            if (!mergedByPpid.has(cari.row.ppid)) {
+              mergedByPpid.set(cari.row.ppid, cari.row);
+              added = 1;
+            }
+            console.debug(
+              `[fee-import] sheet "${hit.name}" (form-Cari): PPID=${cari.row.ppid}, ` +
+                `${cari.row.profil?.details.length ?? 0} rincian modul, +${added} baris baru`
+            );
+            sheetSummaries.push({ name: hit.name, rows: added });
+            sheetDebug.set(hit.name, {
+              ...(sheetDebug.get(hit.name) as SheetDebugInfo),
+              added,
+              skipped: 0,
+              ppid: cari.row.ppid,
+              ...snapshotCariInputs(hit.matrix),
+              headerRow: cari.headerRow + 1,
+            });
+            auditRows += 1;
+            if (cari.row.totalFee === 0) auditZero += 1;
+            if (cari.row.auditFlag) auditClamped += 1;
+            if (auditSamples.length < 5) {
+              auditSamples.push({
+                matrixRow: cari.headerRow + 1,
+                ppid: cari.row.ppid,
+                raw: cari.row.totalFee,
+                parsed: cari.row.totalFee,
+                hasFormula: false,
+              });
+            }
+            if (!primaryCols) {
+              primaryCols = {
+                ppid: "PPID (form Cari)",
+                nama: "Nama Loket (form Cari)",
+                fee: "Fee Bulan Ini (form Cari)",
+                status: "Status Fee (form Cari)",
+                periode: periodeAktif,
+                potongan: ["Minus Loket", "Fee di Tahan", "Potongan Lainnya", "Potongan Ongkir"],
+              };
+              primaryHeaderRow = cari.headerRow + 1;
+              primaryName = hit.name;
+            }
+          } else {
+            console.debug(
+              `[fee-import] sheet "${hit.name}" (form-Cari): PPID kosong (template belum diisi) -> dilewati`
+            );
+            sheetDebug.set(hit.name, {
+              ...(sheetDebug.get(hit.name) as SheetDebugInfo),
+              ppid: null,
+              ...snapshotCariInputs(hit.matrix),
+            });
+          }
+          resolvedSheets.add(hit.name);
+          continue;
+        }
+        // Jalur MUTLAK (indeks fix, hanya BSB) lalu dinamis; plus pengaman
+        // template-drift bila hasil absolut Rp-0 massal.
+        const runDynamic = () =>
+          parseFeeRowsFromAOA(
+            hit.matrix,
+            periodeAktif,
+            fileLabel,
+            hit.target
+              ? {
+                  headerRowHint: hit.target.headerRowHint,
+                  dataStartRowHint: hit.target.dataStartRowHint,
+                  columnHints: hit.target.columnHints,
+                  inspectCell,
+                }
+              : { inspectCell }
+          );
+        const absolute =
+          hit.target?.sheetName === hit.name
+            ? parseLoketBsbRows(hit.matrix, periodeAktif, fileLabel, inspectCell)
+            : null;
+        let parsed = absolute ?? runDynamic();
+        if (
+          absolute &&
+          absolute.rows.length > 0 &&
+          absolute.audit.allZero
+        ) {
+          const dynamic = runDynamic();
+          if (dynamic.rows.length > 0 && !dynamic.audit.allZero) {
+            parsed = dynamic;
+          }
+        }
+        if (parsed.rows.length === 0) {
+          console.debug(
+            `[fee-import] sheet "${hit.name}" (tabel dinamis): 0 baris valid -> dilewati`
+          );
+          const prev = sheetDebug.get(hit.name);
+          if (prev) {
+            sheetDebug.set(hit.name, {
+              ...prev,
+              skipped: parsed.skipped,
+              headerRow: parsed.detectedHeaderRow + 1,
+            });
+          }
+          continue;
+        }
+        let added = 0;
+        for (const r of parsed.rows) {
+          if (!mergedByPpid.has(r.ppid)) {
+            mergedByPpid.set(r.ppid, r);
+            added += 1;
+          }
+        }
+        console.debug(
+          `[fee-import] sheet "${hit.name}" (tabel dinamis): ` +
+            `${parsed.rows.length} baris, +${added} baru, ${parsed.skipped} dilewati`
         );
-      const absolute =
-        hitTarget?.sheetName === hit.name
-          ? parseLoketBsbRows(
-              hit.matrix,
-              buildPeriode(bulan, tahun),
-              fileLabel,
-              inspectCell
-            )
-          : null;
-      let parsed = absolute ?? runDynamic();
-      if (
-        absolute &&
-        absolute.rows.length > 0 &&
-        absolute.audit.allZero
-      ) {
-        const dynamic = runDynamic();
-        if (dynamic.rows.length > 0 && !dynamic.audit.allZero) {
-          parsed = dynamic;
+        sheetSummaries.push({ name: hit.name, rows: added });
+        skippedTotal += parsed.skipped;
+        sheetDebug.set(hit.name, {
+          ...(sheetDebug.get(hit.name) as SheetDebugInfo),
+          added,
+          skipped: parsed.skipped,
+          headerRow: parsed.detectedHeaderRow + 1,
+        });
+        resolvedSheets.add(hit.name);
+        auditRows += parsed.rows.length;
+        auditZero += parsed.audit.zeroFeeRows;
+        auditFormula += parsed.audit.formulaWithoutValue;
+        auditClamped += parsed.audit.clampedFeeRows;
+        for (const s of parsed.audit.samples.slice(
+          0,
+          Math.max(0, 5 - auditSamples.length)
+        )) {
+          auditSamples.push(s);
+        }
+        if (!primaryCols) {
+          primaryCols = parsed.columns;
+          primaryHeaderRow = parsed.detectedHeaderRow + 1;
+          primaryName = hit.name;
         }
       }
-      if (parsed.rows.length === 0) {
+
+      // Jaring pengaman universal (LAST RESORT): pindai baris-per-baris
+      // setiap sheet yang belum terpecahkan (tak masuk hits ATAU parsed
+      // nol baris; form Cari yang tertangani dikecualikan). Setiap baris
+      // berformat-PPID + bukti uang langsung diekstrak; dedup PPID
+      // mencegah ganda dengan hasil parser spesifik. Hasil masuk preview
+      // (gerbang manusia) + verifikasi DB.
+      for (const s of scanned) {
+        if (resolvedSheets.has(s.name)) continue;
+        const uni = parseUniversalFeeRows(s.matrix, periodeAktif, fileLabel);
+        let added = 0;
+        for (const r of uni.rows) {
+          if (!mergedByPpid.has(r.ppid)) {
+            mergedByPpid.set(r.ppid, r);
+            added += 1;
+          }
+        }
+        skippedTotal += uni.skipped;
+        auditRows += uni.rows.length;
+        auditClamped += uni.rows.filter((r) => r.auditFlag).length;
+        const prev = sheetDebug.get(s.name);
+        if (prev) {
+          sheetDebug.set(s.name, {
+            ...prev,
+            kind: `${prev.kind} +pindai-universal`,
+            added,
+            skipped: uni.skipped,
+          });
+        }
+        console.debug(
+          `[fee-import] sheet "${s.name}" (pindai universal): ` +
+            `${uni.rows.length} baris PPID, +${added} baru, ${uni.skipped} dilewati`
+        );
+        if (added > 0) {
+          sheetSummaries.push({ name: `${s.name} (pindai universal)`, rows: added });
+          resolvedSheets.add(s.name);
+          if (!primaryCols) {
+            primaryCols = {
+              ppid: "PPID (pindai universal)",
+              nama: "Nama (pindai universal)",
+              fee: "Nominal terbesar baris",
+              status: "PENDING (asumsi)",
+              periode: periodeAktif,
+              potongan: [],
+            };
+            primaryHeaderRow = 1;
+            primaryName = s.name;
+          }
+        }
+      }
+
+      const merged = [...mergedByPpid.values()];
+      if (merged.length === 0) {
         setParseError(
           "Tidak ada baris fee terdeteksi. Pastikan header memuat PPID + Nama Loket/Agen + Fee/Total."
         );
@@ -1037,16 +1364,37 @@ export default function FeeRekapPage() {
         setParseAudit(null);
         return;
       }
+      const usedSheets = sheetSummaries
+        .filter((s) => s.rows > 0)
+        .map((s) => s.name);
+      console.debug(
+        `[fee-import] ${file.name}: ${hits.length} sheet valid, ` +
+          `${mergedByPpid.size} PPID unik, ${skippedTotal} baris dilewati. ` +
+          `Per sheet: ${sheetSummaries.map((s) => `${s.name}=${s.rows}`).join(", ") || "-"}`
+      );
       setFileMeta({
         name: file.name,
         size: file.size,
-        sheet: hit.name,
-        headerRow: parsed.detectedHeaderRow + 1,
+        sheet:
+          usedSheets.length > 0
+            ? `${usedSheets.join(" + ")} (${usedSheets.length} sheet)`
+            : primaryName,
+        headerRow: primaryHeaderRow,
+        sheets: sheetSummaries,
+        skipped: skippedTotal,
+        sheetsDebug: [...sheetDebug.values()],
       });
-      setPreview(parsed.rows);
-      setSkipped(parsed.skipped);
-      setDetectedCols(parsed.columns);
-      setParseAudit(parsed.audit);
+      setPreview(merged);
+      setSkipped(skippedTotal);
+      setDetectedCols(primaryCols);
+      setParseAudit({
+        totalRows: auditRows,
+        zeroFeeRows: auditZero,
+        allZero: auditRows > 0 && auditZero === auditRows,
+        formulaWithoutValue: auditFormula,
+        clampedFeeRows: auditClamped,
+        samples: auditSamples,
+      });
     } catch (err) {
       setParseError(err instanceof Error ? err.message : "Gagal membaca file.");
       setPreview([]);
@@ -1116,7 +1464,7 @@ export default function FeeRekapPage() {
       // admin langsung melihat N baris / total / baris nol (cross-check
       // terhadap file master, mis. loket 53JCUM03019BGRLM).
       try {
-        const verify = await fetchFeeList({ periode: result.periode, pageSize: 2000 });
+        const verify = await fetchFeeList({ periode: result.periode, pageSize: 1000 });
         // totalFee sudah integer bulat (parseAmount + Math.round di
         // service) sehingga reduce di sini presisi.
         const sum = verify.data.reduce((s, r) => s + r.totalFee, 0);
@@ -1131,6 +1479,29 @@ export default function FeeRekapPage() {
         });
       } catch {
         setVerifyInfo(null);
+      }
+      // Rekonsiliasi level-PPID: pastikan SETIAP PPID preview ada di DB
+      // (fee_loket ATAU loket_profiles). Hitungan baris/sum tidak bisa
+      // menangkap PPID yang terlewat — daftar missing-nya yang bisa.
+      try {
+        const recon = await verifyFeeImport(
+          preview.map((r) => r.ppid),
+          result.periode
+        );
+        if (recon.missingCount > 0) {
+          throw new Error(
+            `${recon.missingCount} dari ${recon.total} PPID TIDAK masuk database ` +
+              `periode ${formatPeriode(recon.periode)} (contoh: ${recon.missing.slice(0, 5).join(", ")}). ` +
+              `Data tidak sinkron — simpan ulang atau periksa diagnostik sebelum lanjut.`
+          );
+        }
+        setSaveResult(
+          (prev) =>
+            `${prev ?? ""} Verifikasi DB: ${recon.found}/${recon.total} PPID cocok.`
+        );
+      } catch (err) {
+        // Gagal verifikasi (atau ada yang hilang) = kegagalan simpan.
+        throw err instanceof Error ? err : new Error("Verifikasi PPID gagal.");
       }
     } catch (err) {
       setSaveResult(null);
@@ -1528,7 +1899,7 @@ export default function FeeRekapPage() {
             </div>
             {!listLoading && !listError && listTruncated && (
               <p role="alert" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-800">
-                Menampilkan {dataset.length} dari {listTotal} baris (batas muat 2000) —
+                Menampilkan {dataset.length} dari {listTotal} baris (batas muat 1000, selaras cap PostgREST max_rows) —
                 gunakan filter periode atau pencarian PPID untuk melihat sisanya.
                 Ringkasan Total Loket &amp; Fee di atas tetap dihitung dari seluruh data.
               </p>
@@ -1885,6 +2256,74 @@ export default function FeeRekapPage() {
                             <Download className="size-3.5" aria-hidden />
                             Unduh JSON diagnostik
                           </button>
+                        </details>
+                      )}
+                      {fileMeta?.sheetsDebug && fileMeta.sheetsDebug.length > 0 && (
+                        <details className="rounded-lg border border-slate-200 bg-white p-2">
+                          <summary className="cursor-pointer text-xs font-semibold text-slate-700">
+                            Transparansi per sheet: sel mentah + hasil baca (
+                            {fileMeta.sheetsDebug.length} sheet)
+                          </summary>
+                          <div className="mt-2 space-y-3">
+                            {fileMeta.sheetsDebug.map((s) => (
+                              <div
+                                key={s.name}
+                                className="rounded-lg border border-slate-100 p-2"
+                              >
+                                <p className="text-xs font-bold text-slate-800">
+                                  {s.name}{" "}
+                                  <span className="ml-1 rounded-full bg-slate-100 px-2 py-0.5 font-mono text-[10px] font-semibold text-slate-600">
+                                    {s.kind}
+                                  </span>
+                                </p>
+                                <p className="mt-1 font-mono text-[11px] leading-relaxed text-slate-600">
+                                  {s.rows} baris x {s.cols} kolom · +{s.added}{" "}
+                                  baris baru · {s.skipped} dilewati
+                                  {s.ppid !== undefined &&
+                                    ` · PPID terbaca: ${s.ppid === null ? "null (template kosong)" : s.ppid}`}
+                                  {s.e3 !== undefined &&
+                                    ` · E3=${s.e3} · E6=${s.e6 ?? "null"}`}
+                                  {s.headerRow != null &&
+                                    s.headerRow > 0 &&
+                                    ` · header baris ${s.headerRow}`}
+                                </p>
+                                {s.sampleRows.length > 0 && (
+                                  <div className="mt-1 overflow-x-auto">
+                                    <table className="w-full min-w-[480px] text-left font-mono text-[10px]">
+                                      <tbody>
+                                        {s.sampleRows.map((row, ri) => (
+                                          <tr
+                                            key={ri}
+                                            className="border-t border-slate-100 first:border-t-0"
+                                          >
+                                            <th
+                                              scope="row"
+                                              className="px-1 py-0.5 text-slate-400"
+                                            >
+                                              R{ri + 1}
+                                            </th>
+                                            {row.map((cell, ci) => (
+                                              <td
+                                                key={ci}
+                                                className="max-w-[160px] truncate px-1 py-0.5 text-slate-600"
+                                                title={cell}
+                                              >
+                                                {cell === "" ? "·" : cell}
+                                              </td>
+                                            ))}
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                            <p className="text-[11px] text-slate-400">
+                              Sampel dibatasi 6 baris x 20 kolom pertama per
+                              sheet; unduhan JSON memuat struktur yang sama.
+                            </p>
+                          </div>
                         </details>
                       )}
                     </div>

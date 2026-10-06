@@ -327,13 +327,97 @@ export function encodeCellAddress(r: number, c: number): string {
   return `${col}${r + 1}`;
 }
 
-/** Heuristik: buffer adalah teks CSV, bukan ZIP/OLE2 biner. */
-function looksLikeCsv(buffer: ArrayBuffer): boolean {
-  if (buffer.byteLength < 2) return false;
-  const bytes = new Uint8Array(buffer.slice(0, 2));
-  const isZip = bytes[0] === 0x50 && bytes[1] === 0x4b;
-  const isOle = bytes[0] === 0xd0 && bytes[1] === 0xcf;
-  return !isZip && !isOle;
+/** Jenis berkas hasil sniffing magic bytes + isi (bukan sekadar ekstensi). */
+export type SpreadsheetKind =
+  | "xlsx" // ZIP OOXML -> dibaca via exceljs
+  | "ole-legacy" // OLE2 CFB (.xls 97-2003, .xlsb) -> ditolak eksplisit
+  | "html" // Spreadsheet HTML ("Save as Web Page" / .xls abal-abal)
+  | "xml-spreadsheet" // SpreadsheetML 2003 (<?xml ... office:spreadsheet)
+  | "csv-text" // teks delimited valid
+  | "unknown"; // biner tak dikenal
+
+function stripUtf8Bom(buf: Buffer): Buffer {
+  return buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf
+    ? buf.subarray(3)
+    : buf;
+}
+
+/**
+ * Klasifikasi isi buffer. Urutan penting: biner dulu (ZIP/OLE),
+ * lalu HTML/XML berbasis teks, terakhir teks delimited.
+ */
+export function detectSpreadsheetKind(buf: Buffer): SpreadsheetKind {
+  if (buf.length < 2) return "unknown";
+  // ZIP OOXML: PK\x03\x04 (arsip biasa), PK\x05\x06 (kosong), PK\x07\x08 (spanned).
+  if (
+    buf[0] === 0x50 &&
+    buf[1] === 0x4b &&
+    buf.length >= 4 &&
+    (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07) &&
+    (buf[3] === 0x04 || buf[3] === 0x06 || buf[3] === 0x08)
+  ) {
+    return "xlsx";
+  }
+  // OLE2 Compound File Binary: D0 CF 11 E0 A1 B1 1A E1 (.xls/.xlsb/.msg).
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0xd0 &&
+    buf[1] === 0xcf &&
+    buf[2] === 0x11 &&
+    buf[3] === 0xe0 &&
+    buf[4] === 0xa1 &&
+    buf[5] === 0xb1 &&
+    buf[6] === 0x1a &&
+    buf[7] === 0xe1
+  ) {
+    return "ole-legacy";
+  }
+  // Biner dengan byte NUL di sampel awal bukan teks -> tak dikenal.
+  const head = buf.subarray(0, Math.min(buf.length, 4096));
+  if (head.includes(0x00)) return "unknown";
+
+  const text = stripUtf8Bom(buf.subarray(0, Math.min(buf.length, 8192))).toString("utf8");
+  const lead = text.replace(/^\s+/, "").toLowerCase();
+  // Spreadsheet HTML: diawali tag HTML/table, atau membawa namespace Office.
+  if (
+    lead.startsWith("<html") ||
+    lead.startsWith("<!doctype html") ||
+    lead.startsWith("<table") ||
+    lead.startsWith("<head") ||
+    text.toLowerCase().includes("urn:schemas-microsoft-com:office:excel")
+  ) {
+    return "html";
+  }
+  // SpreadsheetML 2003: prolog XML + namespace office:spreadsheet.
+  if (
+    lead.startsWith("<?xml") &&
+    text.toLowerCase().includes("urn:schemas-microsoft-com:office:spreadsheet")
+  ) {
+    return "xml-spreadsheet";
+  }
+  // Teks delimited: setidaknya punya baris baru atau salah satu delimiter,
+  // dan rasio karakter pengganti dekode rendah (bukan biner tersamar).
+  const sample = buf.subarray(0, Math.min(buf.length, 65536)).toString("utf8");
+  const replacements = (sample.match(/�/g) ?? []).length;
+  if (sample.length > 0 && replacements / sample.length > 0.05) return "unknown";
+  if (
+    sample.includes("\n") ||
+    sample.includes("\r") ||
+    sample.includes(",") ||
+    sample.includes(";") ||
+    sample.includes("\t")
+  ) {
+    return "csv-text";
+  }
+  return "unknown";
+}
+
+/** Ekstensi dari nama file, lowercase dengan titik (".xlsx") atau "". */
+export function fileExtensionOf(fileName?: string): string {
+  if (!fileName) return "";
+  const base = fileName.split(/[\\/]/).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(dot).toLowerCase() : "";
 }
 
 export interface CsvParseResult {
@@ -344,6 +428,176 @@ export interface CsvParseResult {
   warnings: string[];
   /** Jumlah sel yang dipotong karena melebihi maxCellChars. */
   truncatedCells: number;
+}
+
+export interface HtmlParseResult {
+  /** Satu matriks per <table> (dinamai "Table1", "Table2", ...). */
+  sheets: { name: string; matrix: unknown[][] }[];
+  warnings: string[];
+}
+
+/** Dekode entitas HTML umum + numerik (tanpa DOM, aman di Node/browser). */
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => {
+      try {
+        return String.fromCodePoint(Math.min(Number(n), 0x10ffff));
+      } catch {
+        return "";
+      }
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => {
+      try {
+        return String.fromCodePoint(Math.min(parseInt(h, 16), 0x10ffff));
+      } catch {
+        return "";
+      }
+    });
+}
+
+function attrInt(tag: string, name: string): number {
+  const m = new RegExp(`${name}\\s*=\\s*["']?(\\d+)`, "i").exec(tag);
+  const n = m ? Number(m[1]) : 1;
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 200) : 1;
+}
+
+/**
+ * Ekstrak tabel dari HTML spreadsheet (ekspor sistem lama / "Save as Web
+ * Page" yang di-rename .xls) menjadi matriks AOA per <table>.
+ * - Teks sel = inner-text (tag dalam dibuang, entitas didekode, trim).
+ * - `colspan` mengisi sel lanjutan dengan defval (posisi kolom terjaga).
+ * - `rowspan` sederhana diteruskan ke baris berikut pada kolom yang sama.
+ * - Baris yang seluruhnya kosong dibuang.
+ */
+export function parseHtmlTableMatrices(
+  html: string,
+  defval: unknown
+): HtmlParseResult {
+  const warnings: string[] = [];
+  const clean = html
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<style[\s\S]*?<\/style\s*>/gi, "");
+  const tables = clean.match(/<table\b[\s\S]*?<\/table\s*>/gi) ?? [];
+  const sheets: { name: string; matrix: unknown[][] }[] = [];
+  tables.forEach((table, ti) => {
+    const matrix: unknown[][] = [];
+    const pending: { remaining: number; value: unknown }[] = [];
+    const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi;
+    let rm: RegExpExecArray | null;
+    while ((rm = rowRe.exec(table)) !== null) {
+      const rowHtml = rm[1] ?? "";
+      const row: unknown[] = [];
+      let col = 0;
+      const flushPending = () => {
+        while (col < pending.length && (pending[col]?.remaining ?? 0) > 0) {
+          row.push(pending[col]?.value ?? defval);
+          col += 1;
+        }
+      };
+      flushPending();
+      const cellRe = /<(td|th)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi;
+      let cm: RegExpExecArray | null;
+      let seenCell = false;
+      while ((cm = cellRe.exec(rowHtml)) !== null) {
+        seenCell = true;
+        flushPending();
+        const attrs = cm[2] ?? "";
+        const inner = (cm[3] ?? "").replace(/<[^>]+>/g, " ");
+        const v = decodeHtmlEntities(inner).replace(/\s+/g, " ").trim();
+        const value: unknown = v === "" ? defval : v;
+        const colspan = attrInt(attrs, "colspan");
+        const rowspan = attrInt(attrs, "rowspan");
+        for (let k = 0; k < colspan; k += 1) {
+          if (k === 0) row.push(value);
+          else row.push(defval);
+          while (pending.length <= col) pending.push({ remaining: 0, value: defval });
+          if (rowspan > 1 && k === 0) pending[col] = { remaining: rowspan - 1, value };
+          col += 1;
+        }
+      }
+      // Baris tanpa <td>/<th> (mis. <tr> pembatas) dilewati.
+      if (!seenCell) continue;
+      flushPending();
+      const isEmpty = row.every((c) => c === defval);
+      if (!isEmpty) matrix.push(row);
+      for (const p of pending) {
+        if (p.remaining > 0) p.remaining -= 1;
+      }
+    }
+    if (matrix.length > 0) {
+      sheets.push({ name: `Table${ti + 1}`, matrix });
+    }
+  });
+  if (tables.length > 0 && sheets.length === 0) {
+    warnings.push(
+      `Ditemukan ${tables.length} tabel HTML tetapi semuanya kosong setelah dibersihkan.`
+    );
+  }
+  return { sheets, warnings };
+}
+
+export interface XmlSpreadsheetResult {
+  sheets: { name: string; matrix: unknown[][] }[];
+  warnings: string[];
+}
+
+/**
+ * Ekstrak SpreadsheetML 2003 (`<Workbook><Worksheet><Table><Row><Cell><Data>`)
+ * menjadi matriks per worksheet. Mendukung `ss:Index` (lompatan kolom) dan
+ * `ss:Name` sebagai nama sheet.
+ */
+export function parseXmlSpreadsheetMatrices(
+  xml: string,
+  defval: unknown
+): XmlSpreadsheetResult {
+  const warnings: string[] = [];
+  const sheets: { name: string; matrix: unknown[][] }[] = [];
+  const clean = xml.replace(/<!--[\s\S]*?-->/g, "");
+  const wsRe = /<Worksheet\b([^>]*)>([\s\S]*?)<\/Worksheet\s*>/gi;
+  let wm: RegExpExecArray | null;
+  let wi = 0;
+  while ((wm = wsRe.exec(clean)) !== null) {
+    wi += 1;
+    const wsAttrs = wm[1] ?? "";
+    const wsBody = wm[2] ?? "";
+    const nameM = /ss:Name\s*=\s*"([^"]+)"/i.exec(wsAttrs);
+    const name = nameM?.[1] ?? `Sheet${wi}`;
+    const matrix: unknown[][] = [];
+    const rowRe = /<Row\b[^>]*>([\s\S]*?)<\/Row\s*>/gi;
+    let rm: RegExpExecArray | null;
+    while ((rm = rowRe.exec(wsBody)) !== null) {
+      const rowHtml = rm[1] ?? "";
+      const row: unknown[] = [];
+      const cellRe = /<Cell\b([^>]*)>([\s\S]*?)<\/Cell\s*>/gi;
+      let cm: RegExpExecArray | null;
+      while ((cm = cellRe.exec(rowHtml)) !== null) {
+        const attrs = cm[1] ?? "";
+        const idxM = /(?:ss:)?Index\s*=\s*"(\d+)"/i.exec(attrs);
+        const idx = idxM ? Math.max(Number(idxM[1]), 1) : row.length + 1;
+        while (row.length < idx - 1) row.push(defval);
+        const dataM = /<Data\b[^>]*>([\s\S]*?)<\/Data\s*>/i.exec(cm[2] ?? "");
+        const v = decodeHtmlEntities(dataM?.[1] ?? "").replace(/\s+/g, " ").trim();
+        row.push(v === "" ? defval : v);
+      }
+      if (row.length === 0) continue;
+      if (row.every((c) => c === defval)) continue;
+      matrix.push(row);
+    }
+    if (matrix.length > 0) {
+      sheets.push({ name, matrix });
+    }
+  }
+  if (sheets.length === 0) {
+    warnings.push("Tidak ada worksheet berisi data pada SpreadsheetML ini.");
+  }
+  return { sheets, warnings };
 }
 
 /** Deteksi delimiter dari 5 baris pertama dengan skor (abaikan konten dalam kutip). */
@@ -511,76 +765,156 @@ export interface LoadedWorkbook {
 /**
  * Buffer file (browser ArrayBuffer / Node Buffer) -> workbook exceljs.
  * Signature stabil: input Buffer-ish, output daftar sheet + matriks.
- * Menolak `.xls` (OLE2) / `.xlsb` (BIFF12) dengan pesan migrasi yang jelas;
- * `.csv` diparse lewat parser bawaan.
+ *
+ * Routing BERDASARKAN ISI (magic bytes), bukan ekstensi:
+ * - ZIP OOXML (.xlsx/.xlsm) -> exceljs.
+ * - Teks delimited (.csv/.txt) -> parser CSV bawaan.
+ * - HTML spreadsheet & SpreadsheetML 2003 (ekspor sistem lama berekstensi
+ *   .xls) -> ekstraksi tabel otomatis (perilaku proyek lama via SheetJS).
+ * - OLE2 biner murni (.xls 97-2003) dan biner tak dikenal -> DITOLAK dengan
+ *   pesan konversi yang jelas, TIDAK PERNAH dilempar ke parser CSV
+ *   (sumber bug "4 baris HTML mentah").
+ *
+ * `fileExt` (mis. ".xlsx"; otomatis dari nama file bila tersedia) hanya
+ * dipakai untuk mendeteksi KETIDAKCOCOKAN ekstensi-vs-isi.
  */
 export async function loadWorkbookFromBuffer(
   input: ArrayBuffer | Uint8Array | Buffer,
-  opts: { defval?: unknown; fileName?: string } & Partial<MatrixLimits> = {}
+  opts: { defval?: unknown; fileName?: string; fileExt?: string } & Partial<MatrixLimits> = {}
 ): Promise<LoadedWorkbook> {
   const defval = opts.defval ?? null;
   const fileName = opts.fileName;
+  const fileExt = (opts.fileExt ?? fileExtensionOf(fileName)).toLowerCase();
   const buf =
     input instanceof ArrayBuffer
       ? Buffer.from(new Uint8Array(input))
       : Buffer.isBuffer(input)
         ? input
         : Buffer.from(input);
+  const fname = fileName ? `Berkas "${fileName}" · ` : "";
+  const kind = detectSpreadsheetKind(buf);
 
-  // Tolak eksplisit format legacy yang tidak bisa dibaca exceljs.
-  if (buf.length >= 2 && buf[0] === 0xd0 && buf[1] === 0xcf) {
+  // OLE2 legacy: exceljs tidak bisa membaca; JANGAN fallback ke CSV.
+  if (kind === "ole-legacy") {
     throw new Error(
-      "Format .xls lama tidak didukung parser baru (exceljs). Simpan ulang berkas sebagai .xlsx lalu unggah kembali."
+      `${fname}Format .xls lama (Excel 97-2003) tidak didukung parser. Buka di Excel/WPS lalu simpan ulang sebagai .xlsx dan unggah kembali.`
     );
   }
 
-  // Jalur CSV: teks biasa (bukan ZIP) -> parser ringan.
-  if (looksLikeCsv(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer)) {
-    const text = buf.toString("utf8");
-    // Jika bukan teks yang masuk akal (biner tak dikenal), biarkan exceljs
-    // yang menolak dengan pesan di bawah.
-    if (text.includes("\n") || text.includes(",") || text.includes(";") || text.includes("\t") || text.includes("\r")) {
-      // Guard dini: file teks > 25MB hampir pasti salah format/korup.
-      if (buf.byteLength > 25 * 1024 * 1024) {
-        throw new MatrixLimitError(
-          "TOTAL_TOO_LARGE",
-          `${fileName ? `Berkas "${fileName}" · ` : ""}Ukuran teks ${(buf.byteLength / 1048576).toFixed(1)}MB melebihi 25MB. Jika ini file .xlsx yang ter-rename jadi .csv (atau sebaliknya), kembalikan ekstensinya lalu simpan ulang sebagai .xlsx.`,
-          { fileName, sheetName: "Sheet1", hint: "Pastikan ekstensi sesuai isi (CSV = teks, XLSX = biner ZIP). Simpan ulang sebagai .xlsx." }
-        );
-      }
-      const parsed = parseCsvMatrix(text, defval, {
-        maxCellChars: opts.maxCellChars,
-        maxTotalChars: opts.maxTotalChars,
-      });
-      const matrix = parsed.matrix;
+  // Spreadsheet HTML (ekspor sistem lama / "Save as Web Page" yang
+  // di-rename jadi .xls): ekstrak tabel otomatis seperti proyek lama.
+  if (kind === "html") {
+    const text = stripUtf8Bom(buf).toString("utf8");
+    const parsed = parseHtmlTableMatrices(text, defval);
+    if (parsed.sheets.length === 0) {
+      throw new Error(
+        `${fname}Berkas tampak seperti halaman HTML tetapi tidak ada tabel data (<table>) yang bisa dibaca. ` +
+          `Buka di browser/Excel, salin tabelnya ke workbook baru (atau Save As .xlsx/.csv), lalu unggah kembali.`
+      );
+    }
+    const matrices = new Map<string, unknown[][]>();
+    for (const s of parsed.sheets) {
       if (opts.maxRows !== undefined || opts.maxCols !== undefined) {
-        validateMatrixLimits(matrix, {
+        validateMatrixLimits(s.matrix, {
           maxRows: opts.maxRows ?? Number.MAX_SAFE_INTEGER,
           maxCols: opts.maxCols ?? Number.MAX_SAFE_INTEGER,
           maxCellChars: opts.maxCellChars,
           maxTotalChars: opts.maxTotalChars,
           onOversizeCell: opts.onOversizeCell,
           fileName,
-          sheetName: "Sheet1",
+          sheetName: s.name,
         });
       }
-      // Selipkan peringatan parser (kutip liar/delimiter) ke console agar
-      // bisa diaudit tanpa menggagalkan upload file yang masih bisa dibaca.
-      for (const w of parsed.warnings) console.warn(`[csv] ${fileName ?? ""}: ${w}`);
-      return {
-        sheetNames: ["Sheet1"],
-        matrices: new Map([["Sheet1", matrix]]),
-        worksheets: new Map(),
-      };
+      matrices.set(s.name, s.matrix);
     }
+    for (const w of parsed.warnings) console.warn(`[html] ${fileName ?? ""}: ${w}`);
+    return { sheetNames: parsed.sheets.map((s) => s.name), matrices, worksheets: new Map() };
   }
 
+  // SpreadsheetML 2003 (.xml): ekstrak worksheet otomatis.
+  if (kind === "xml-spreadsheet") {
+    const text = stripUtf8Bom(buf).toString("utf8");
+    const parsed = parseXmlSpreadsheetMatrices(text, defval);
+    if (parsed.sheets.length === 0) {
+      throw new Error(
+        `${fname}SpreadsheetML 2003 ini tidak memuat worksheet berisi data. Simpan ulang sebagai .xlsx (atau .csv) lalu unggah kembali.`
+      );
+    }
+    const matrices = new Map<string, unknown[][]>();
+    for (const s of parsed.sheets) {
+      if (opts.maxRows !== undefined || opts.maxCols !== undefined) {
+        validateMatrixLimits(s.matrix, {
+          maxRows: opts.maxRows ?? Number.MAX_SAFE_INTEGER,
+          maxCols: opts.maxCols ?? Number.MAX_SAFE_INTEGER,
+          maxCellChars: opts.maxCellChars,
+          maxTotalChars: opts.maxTotalChars,
+          onOversizeCell: opts.onOversizeCell,
+          fileName,
+          sheetName: s.name,
+        });
+      }
+      matrices.set(s.name, s.matrix);
+    }
+    for (const w of parsed.warnings) console.warn(`[xml] ${fileName ?? ""}: ${w}`);
+    return { sheetNames: parsed.sheets.map((s) => s.name), matrices, worksheets: new Map() };
+  }
+
+  // Teks delimited TAPI ekstensi mengaku Excel -> tolak eksplisit agar
+  // tidak terbaca sebagai "beberapa baris aneh" di jalur CSV.
+  if (
+    kind === "csv-text" &&
+    (fileExt === ".xls" || fileExt === ".xlsx" || fileExt === ".xlsm" || fileExt === ".xlsb")
+  ) {
+    throw new Error(
+      `${fname}Isi berkas adalah teks CSV tetapi ekstensinya "${fileExt}". Ganti nama menjadi .csv, atau simpan ulang sebagai .xlsx bila memang workbook Excel.`
+    );
+  }
+
+  // Jalur CSV: hanya untuk teks delimited.
+  if (kind === "csv-text") {
+    const text = stripUtf8Bom(buf).toString("utf8");
+    // Guard dini: file teks > 25MB hampir pasti salah format/korup.
+    if (buf.byteLength > 25 * 1024 * 1024) {
+      throw new MatrixLimitError(
+        "TOTAL_TOO_LARGE",
+        `${fname}Ukuran teks ${(buf.byteLength / 1048576).toFixed(1)}MB melebihi 25MB. Jika ini file .xlsx yang ter-rename jadi .csv (atau sebaliknya), kembalikan ekstensinya lalu simpan ulang sebagai .xlsx.`,
+        { fileName, sheetName: "Sheet1", hint: "Pastikan ekstensi sesuai isi (CSV = teks, XLSX = biner ZIP). Simpan ulang sebagai .xlsx." }
+      );
+    }
+    const parsed = parseCsvMatrix(text, defval, {
+      maxCellChars: opts.maxCellChars,
+      maxTotalChars: opts.maxTotalChars,
+    });
+    const matrix = parsed.matrix;
+    if (opts.maxRows !== undefined || opts.maxCols !== undefined) {
+      validateMatrixLimits(matrix, {
+        maxRows: opts.maxRows ?? Number.MAX_SAFE_INTEGER,
+        maxCols: opts.maxCols ?? Number.MAX_SAFE_INTEGER,
+        maxCellChars: opts.maxCellChars,
+        maxTotalChars: opts.maxTotalChars,
+        onOversizeCell: opts.onOversizeCell,
+        fileName,
+        sheetName: "Sheet1",
+      });
+    }
+    // Selipkan peringatan parser (kutip liar/delimiter) ke console agar
+    // bisa diaudit tanpa menggagalkan upload file yang masih bisa dibaca.
+    for (const w of parsed.warnings) console.warn(`[csv] ${fileName ?? ""}: ${w}`);
+    return {
+      sheetNames: ["Sheet1"],
+      matrices: new Map([["Sheet1", matrix]]),
+      worksheets: new Map(),
+    };
+  }
+
+  // Jalur Excel: ZIP OOXML dibaca via exceljs. Biner tak dikenal pun
+  // dicoba via exceljs agar pesan gagalnya spesifik (mis. PDF rename .xlsx).
   const wb = new ExcelJS.Workbook();
   try {
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
   } catch {
     throw new Error(
-      `${fileName ? `Berkas "${fileName}" · ` : ""}Gagal membaca berkas Excel. Parser hanya mendukung .xlsx/.xlsm (dan .csv). Untuk .xls/.xlsb, simpan ulang sebagai .xlsx lalu unggah kembali.`
+      `${fname}Gagal membaca berkas Excel. Parser hanya mendukung .xlsx/.xlsm (dan .csv). Untuk .xls/.xlsb, simpan ulang sebagai .xlsx lalu unggah kembali.`
     );
   }
   const sheetNames = wb.worksheets.map((ws) => ws.name);

@@ -3,6 +3,7 @@ import {
   columnLetter,
   extractReconcileInputRows,
   findReconcileHeader,
+  normalizeReconcileRowsFromObjects,
 } from "../reconcileHeader";
 
 describe("findReconcileHeader — toleran judul & sinonim", () => {
@@ -119,11 +120,42 @@ describe("extractReconcileInputRows", () => {
     ]);
   });
 });
-
 describe("columnLetter", () => {
   it("A, Z, AA", () => {
     expect(columnLetter(0)).toBe("A");
     expect(columnLetter(25)).toBe("Z");
     expect(columnLetter(26)).toBe("AA");
+  });
+});
+
+describe("porting proyek lama — alias NOMOR + fallback objek", () => {
+  it('header tua bertuliskan "Nomor" saja tetap terdeteksi (prioritas terendah)', () => {
+    const matrix: unknown[][] = [
+      ["Produk", "Nomor"],
+      ["PKH", "P26123"],
+    ];
+    expect(findReconcileHeader(matrix)).toMatchObject({ produkCol: 0, resiCol: 1 });
+  });
+
+  it("kolom resi spesifik menang atas kolom Nomor generik", () => {
+    const matrix: unknown[][] = [
+      ["Produk", "Nomor Urut", "Nomor Resi"],
+      ["PKH", "1", "P26123"],
+    ];
+    expect(findReconcileHeader(matrix)).toMatchObject({ produkCol: 0, resiCol: 2 });
+  });
+
+  it("normalizeReconcileRowsFromObjects: kunci baris-pertama dicocokkan alias", () => {
+    const rows = normalizeReconcileRowsFromObjects([
+      { PRODUK: "PKH", "NOMOR RESI": "P26123" },
+      { PRODUK: "EC3", "NOMOR RESI": "SHPE1" },
+      { PRODUK: "", "NOMOR RESI": "" },
+    ]);
+    expect(rows).toEqual([
+      { produk: "PKH", nomor_resi: "P26123" },
+      { produk: "EC3", nomor_resi: "SHPE1" },
+    ]);
+    expect(normalizeReconcileRowsFromObjects([])).toEqual([]);
+    expect(normalizeReconcileRowsFromObjects([{ Foo: "x" }])).toEqual([]);
   });
 });

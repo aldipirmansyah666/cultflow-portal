@@ -55,6 +55,10 @@ export const RESI_ALIASES = [
   "connoteno",
   "tracking",
   "airwaybill",
+  // Porting dari proyek lama (`kurlog-operations-portal` alias 'NOMOR'):
+  // header tua cukup bertuliskan "Nomor" saja. Prioritas paling rendah
+  // agar kolom "Nomor Resi"/"AWB" selalu menang bila sama-sama ada.
+  "nomor",
 ] as const;
 
 /** Normalisasi sel header: lowercase, hanya a-z (buang spasi/underscore/angka). */
@@ -195,6 +199,33 @@ export function extractReconcileInputRows(
     ) {
       continue;
     }
+    out.push({ produk, nomor_resi });
+  }
+  return out;
+}
+
+/**
+ * Fallback porting proyek lama (`normalizeReconcileRows`): bila pemindaian
+ * AOA tak menemukan header (mis. bentuk sheet tak biasa), coba perlakukan
+ * baris pertama sebagai kunci objek (hasil `matrixToObjects`) lalu cocokkan
+ * kunci tersebut dengan alias. Dipakai setelah jalur AOA gagal di semua sheet.
+ */
+export function normalizeReconcileRowsFromObjects(
+  rows: Record<string, unknown>[]
+): ReconcileInputRow[] {
+  if (rows.length === 0) return [];
+  const keys = Object.keys(rows[0] ?? {});
+  const normalized = keys.map((k) => normalizeHeaderCell(k));
+  const produkCol = findBestCol(normalized, PRODUK_ALIASES);
+  const resiCol = findBestCol(normalized, RESI_ALIASES);
+  if (produkCol === -1 || resiCol === -1 || produkCol === resiCol) return [];
+  const produkKey = keys[produkCol] ?? "";
+  const resiKey = keys[resiCol] ?? "";
+  const out: ReconcileInputRow[] = [];
+  for (const row of rows) {
+    const produk = cellText(row[produkKey]);
+    const nomor_resi = cellText(row[resiKey]);
+    if (produk === "" && nomor_resi === "") continue;
     out.push({ produk, nomor_resi });
   }
   return out;
