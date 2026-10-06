@@ -1056,7 +1056,12 @@ export default function FeeRekapPage() {
       for (const name of wb.sheetNames.slice(0, 10)) {
         const raw = wb.matrices.get(name) ?? [];
         const ws = wb.worksheets.get(name);
-        validateMatrixLimits(raw, { maxRows: 20030, maxCols: 250 });
+        validateMatrixLimits(raw, {
+          maxRows: 20030,
+          maxCols: 250,
+          fileName: file.name,
+          sheetName: name,
+        });
         scanned.push({
           name,
           matrix: ws ? fillMergedCells(raw, getMergeRanges(ws)) : raw,

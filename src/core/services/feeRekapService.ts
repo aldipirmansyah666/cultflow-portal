@@ -113,6 +113,38 @@ export function isValidPeriode(value: unknown): boolean {
   return typeof value === "string" && FEE_PERIODE_REGEX.test(value.trim());
 }
 
+const BULAN_MAP: Record<string, number> = {
+  januari: 1, februari: 2, maret: 3, april: 4, mei: 5, juni: 6,
+  juli: 7, agustus: 8, september: 9, oktober: 10, november: 11, desember: 12,
+  january: 1, february: 2, march: 3, may: 5, june: 6,
+  july: 7, august: 8, october: 10,
+  jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, agu: 8, aug: 8,
+  sep: 9, sept: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12,
+};
+
+/**
+ * Kanonisasi input periode apa pun menjadi "YYYY-MM" / "YYYY-MM-Tn".
+ * Menerima bentuk kanonis ("2026-09-T1") maupun tampilan
+ * ("September 2026 - T1", "september 2026", "Sep/2026 T2").
+ * Mengembalikan "" bila tak dikenali — pakai `isValidPeriode` untuk cek.
+ * Mencegah mismatch spasi/format antara UI, file Excel, dan database
+ * (sumber klasik "TIDAK masuk database" palsu).
+ */
+export function canonicalizePeriode(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const t = value.trim().replace(/\s+/g, " ");
+  if (FEE_PERIODE_REGEX.test(t)) return t;
+  const m = /^([a-z]+)\s+(\d{4})(?:\s*[-/]?\s*t([123]))?$/i.exec(t);
+  if (!m) return "";
+  const bulan = BULAN_MAP[(m[1] ?? "").toLowerCase()] ?? 0;
+  const tahun = Number(m[2]);
+  if (bulan < 1 || bulan > 12 || !Number.isInteger(tahun) || tahun < 2000 || tahun > 2100) {
+    return "";
+  }
+  const base = `${tahun}-${String(bulan).padStart(2, "0")}`;
+  return m[3] !== undefined ? `${base}-T${m[3]}` : base;
+}
+
 /**
  * Sanitasi kata kunci untuk pola `or/ilike` PostgREST:
  * buang koma (pemisah kondisi) dan karakter wildcard.

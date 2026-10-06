@@ -12,15 +12,20 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { getSession } from "@/lib/session";
 import {
-  FEE_PERIODE_REGEX,
+  canonicalizePeriode,
   normalizePpid,
 } from "@/core/services/feeRekapService";
 
 export const dynamic = "force-dynamic";
+// Verifikasi 10rb+ PPID = puluhan query .in() ber-chunk; beri ruang
+// eksekusi agar tidak timeout (false "gagal sinkron") di serverless.
+export const maxDuration = 60;
 
 const MAX_PPIDS = 20000;
 const IN_CHUNK = 500;
 const MAX_MISSING_LISTED = 100;
+/** Konkurrensi query .in() agar verifikasi massal tidak serial lambat. */
+const VERIFY_CONCURRENCY = 6;
 
 async function existingPpids(
   table: string,
@@ -29,19 +34,33 @@ async function existingPpids(
 ): Promise<Set<string>> {
   const admin = getSupabaseAdmin();
   const found = new Set<string>();
+  const chunks: string[][] = [];
   for (let i = 0; i < ppids.length; i += IN_CHUNK) {
-    const chunk = ppids.slice(i, i + IN_CHUNK);
-    const { data, error } = await admin
-      .from(table)
-      .select("ppid")
-      .eq("periode", periode)
-      .in("ppid", chunk);
-    if (error) throw error;
-    for (const row of (data ?? []) as { ppid: unknown }[]) {
-      const key = normalizePpid(row.ppid);
-      if (key !== "") found.add(key);
-    }
+    chunks.push(ppids.slice(i, i + IN_CHUNK));
   }
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const idx = next;
+      next += 1;
+      if (idx >= chunks.length) return;
+      const { data, error } = await admin
+        .from(table)
+        .select("ppid")
+        .eq("periode", periode)
+        .in("ppid", chunks[idx] as string[]);
+      if (error) throw error;
+      for (const row of (data ?? []) as { ppid: unknown }[]) {
+        const key = normalizePpid(row.ppid);
+        if (key !== "") found.add(key);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(VERIFY_CONCURRENCY, Math.max(1, chunks.length)) }, () =>
+      worker()
+    )
+  );
   return found;
 }
 
@@ -69,13 +88,10 @@ export async function POST(req: Request) {
       { status: 413 }
     );
   }
-  const cleanPeriode =
-    typeof periode === "string" && FEE_PERIODE_REGEX.test(periode.trim())
-      ? periode.trim()
-      : "";
+  const cleanPeriode = canonicalizePeriode(periode);
   if (cleanPeriode === "") {
     return NextResponse.json(
-      { error: "periode harus format YYYY-MM" },
+      { error: "periode harus format YYYY-MM atau YYYY-MM-T1..T3" },
       { status: 400 }
     );
   }

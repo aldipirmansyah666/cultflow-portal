@@ -20,8 +20,8 @@ import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { getSession, isAdminSession } from "@/lib/session";
 import {
+  canonicalizePeriode,
   classifyFeeDbError,
-  FEE_PERIODE_REGEX,
   IMPORT_MAX_ROWS_PER_REQUEST,
   normalizeImportProfil,
   runBatchesIsolated,
@@ -91,10 +91,13 @@ export async function POST(req: Request) {
       { status: 413 }
     );
   }
-  const declaredPeriode = cleanStr(periode, 7);
-  if (!FEE_PERIODE_REGEX.test(declaredPeriode)) {
+  // Periode dikanonisasi (BUKAN dipotong 7 karakter — slice(0,7) akan
+  // membuang sufiks termin "-T1" sehingga T1/T2/T3 saling menimpa).
+  // Menerima "2026-09-T1" maupun "September 2026 - T1".
+  const declaredPeriode = canonicalizePeriode(periode);
+  if (declaredPeriode === "") {
     return NextResponse.json(
-      { error: "periode harus format YYYY-MM" },
+      { error: "periode harus format YYYY-MM atau YYYY-MM-T1..T3 (contoh: September 2026 - T1)" },
       { status: 400 }
     );
   }

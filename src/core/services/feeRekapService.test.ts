@@ -47,6 +47,7 @@ import {
   IMPORT_CHUNK_SIZE,
   MOCK_FEE_DATA,
   canonicalFeeSearch,
+  canonicalizePeriode,
   escapeFeeLike,
   exactPpidCandidates,
   mergeExactFirst,
@@ -79,8 +80,7 @@ describe("feeRekapService", () => {
     expect(formatPeriode("2026-09")).toBe("September 2026");
   });
 
-  it("periode termin: build/format/regex T1-T3, tolak T0/T4", () => {
-    expect(buildPeriode(9, 2026)).toBe("2026-09");
+  it("periode termin: build/format/regex T1-T3, tolak T0/T4", () => {    expect(buildPeriode(9, 2026)).toBe("2026-09");
     expect(buildPeriode(9, 2026, 0)).toBe("2026-09");
     expect(buildPeriode(9, 2026, 1)).toBe("2026-09-T1");
     expect(buildPeriode(9, 2026, 3)).toBe("2026-09-T3");
@@ -94,6 +94,20 @@ describe("feeRekapService", () => {
     expect(isValidPeriode("2026-09-T4")).toBe(false);
     expect(isValidPeriode("2026-13")).toBe(false);
     expect(isValidPeriode("")).toBe(false);
+  });
+
+  it("canonicalizePeriode: kanonis + tampilan -> kanonis (anti mismatch spasi/format)", () => {
+    expect(canonicalizePeriode("2026-09-T1")).toBe("2026-09-T1");
+    expect(canonicalizePeriode("  2026-09  ")).toBe("2026-09");
+    expect(canonicalizePeriode("September 2026 - T1")).toBe("2026-09-T1");
+    expect(canonicalizePeriode("september 2026")).toBe("2026-09");
+    expect(canonicalizePeriode("Sep 2026 T2")).toBe("2026-09-T2");
+    expect(canonicalizePeriode("Agustus 2026")).toBe("2026-08");
+    expect(canonicalizePeriode("September 2026 - T4")).toBe("");
+    expect(canonicalizePeriode("2026-13")).toBe("");
+    expect(canonicalizePeriode("Foo 2026")).toBe("");
+    expect(canonicalizePeriode("")).toBe("");
+    expect(canonicalizePeriode(null)).toBe("");
   });
 
   it("filter realtime by PPID/nama + periode", () => {

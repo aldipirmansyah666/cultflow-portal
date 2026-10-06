@@ -19,9 +19,9 @@ import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { getSession } from "@/lib/session";
 import {
   canonicalFeeSearch,
+  canonicalizePeriode,
   classifyFeeDbError,
   exactPpidCandidates,
-  isValidPeriode,
   normalizePpid,
   ppidFuzzyPattern,
   ppidSearchKey,
@@ -38,10 +38,6 @@ export const dynamic = "force-dynamic";
 const PROFIL_COLUMNS =
   "ppid,nama_loket,bank,no_rekening,nama_pemilik,rekomender,elektrik_area,periode,fee_bulan_ini,fee_bulan_sebelumnya,subsidi_antar_loket,total_fee,minus,hold,potongan_lainnya,potongan_ongkir,total_fee_transfer,fee_ke_deposit,fee_transfer_rekening,sisa_fee,keterangan,tanggal_transfer,fee_siap_transfer,status_pembayaran";
 
-function validPeriode(value: string): boolean {
-  return isValidPeriode(value);
-}
-
 export async function GET(req: Request) {
   const session = await getSession();
   if (!session) {
@@ -57,10 +53,12 @@ export async function GET(req: Request) {
   }
   const periodeParam = (params.get("periode") ?? "").trim();
   const periode =
-    periodeParam !== "" && periodeParam !== "SEMUA" ? periodeParam : "";
-  if (periode !== "" && !validPeriode(periode)) {
+    periodeParam !== "" && periodeParam.toUpperCase() !== "SEMUA"
+      ? canonicalizePeriode(periodeParam)
+      : "";
+  if (periodeParam !== "" && periodeParam.toUpperCase() !== "SEMUA" && periode === "") {
     return NextResponse.json(
-      { error: "periode harus format YYYY-MM" },
+      { error: "periode harus format YYYY-MM atau YYYY-MM-T1..T3" },
       { status: 400 }
     );
   }
