@@ -14,36 +14,12 @@ import {
   validateReconcileRows,
   type ReconcileValidationResult,
 } from "@/core/parsers/reconcileValidator";
+import {
+  columnLetter,
+  extractReconcileInputRows,
+  findReconcileHeader,
+} from "@/core/parsers/reconcileHeader";
 import { cn } from "@/lib/utils";
-
-interface DetectedHeader {
-  row: number;
-  produkCol: number;
-  resiCol: number;
-}
-
-/** Cari baris header: memuat kolom produk DAN kolom resi (maks 20 baris awal). */
-function findReconcileHeader(matrix: unknown[][]): DetectedHeader | null {
-  const limit = Math.min(matrix.length, 20);
-  for (let r = 0; r < limit; r += 1) {
-    const cells = (matrix[r] ?? []).map((c) =>
-      String(c ?? "")
-        .toLowerCase()
-        .replace(/[^a-z]/g, "")
-    );
-    const produkCol = cells.findIndex((c) => c.includes("produk"));
-    const resiCol = cells.findIndex((c) => c.includes("resi"));
-    if (produkCol !== -1 && resiCol !== -1) {
-      return { row: r, produkCol, resiCol };
-    }
-  }
-  return null;
-}
-
-function cellText(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  return String(value).trim();
-}
 
 export default function ReconcilePage() {
   const [fileName, setFileName] = useState<string>("");
@@ -94,21 +70,28 @@ export default function ReconcilePage() {
         if (e instanceof MatrixLimitError) throw e;
         throw e;
       }
+      // Pindai SELURUH sheet (tanpa batas baris): judul laporan sepanjang
+      // apapun di atas tabel dilewati via sistem skor (lihat reconcileHeader).
       const header = findReconcileHeader(matrix);
       if (!header) {
         throw new Error(
-          "Kolom Produk dan Nomor Resi tidak ditemukan (dipindai 20 baris pertama)."
+          `Kolom Produk dan Nomor Resi tidak ditemukan di "${file.name}" (dipindai ${matrix.length} baris, seluruh sheet "${firstName}"). ` +
+            `Dikenali sebagai produk: produk/product/jenis/layanan/service/tipe; sebagai resi: nomor_resi/no_resi/resi/AWB/connote/tracking/airwaybill (tak peka huruf besar-kecil). ` +
+            (matrix.length <= 4
+              ? `File hanya terbaca ${matrix.length} baris — kemungkinan delimiter salah (CSV memakai koma vs titik-koma) atau data ada di sheet lain. `
+              : `Pastikan salah satunya tertulis sebagai judul kolom.`)
         );
       }
-      const inputRows = matrix
-        .slice(header.row + 1)
-        .map((cells) => ({
-          produk: cellText(cells[header.produkCol]),
-          nomor_resi: cellText(cells[header.resiCol]),
-        }))
-        .filter((r) => r.produk !== "" || r.nomor_resi !== "");
+      const inputRows = extractReconcileInputRows(matrix, header);
       if (inputRows.length === 0) {
-        throw new Error("Tidak ada baris data di bawah header.");
+        const checked = matrix.length - (header.row + 1);
+        throw new Error(
+          `Tidak ada baris data di bawah header di "${file.name}". ` +
+            `Header terdeteksi di baris ${header.row + 1} (kolom Produk ${columnLetter(header.produkCol)} "${header.produkHeader}", ` +
+            `kolom Resi ${columnLetter(header.resiCol)} "${header.resiHeader}"); ` +
+            `${checked} baris di bawahnya kosong. ` +
+            `Jika file memiliki judul laporan di atas, itu sudah dilewati otomatis — periksa apakah data berada di sheet pertama dan kolom tidak bergeser.`
+        );
       }
       setFileName(file.name);
       setResult(validateReconcileRows(inputRows));
