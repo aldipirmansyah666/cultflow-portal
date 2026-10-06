@@ -273,6 +273,19 @@ export default function ReconcilePage() {
                       {breakdown.pjbValid} resi
                     </dd>
                   </div>
+                  {Object.entries(breakdown.byProduct)
+                    .filter(
+                      ([p, s]) =>
+                        !["PKH", "EC3", "PE", "PJB"].includes(p) && s.valid > 0
+                    )
+                    .map(([p, s]) => (
+                      <div key={p} className="flex items-baseline justify-between gap-2">
+                        <dt className="font-semibold text-slate-600">{p} Valid</dt>
+                        <dd className="font-extrabold text-emerald-700">
+                          {s.valid} resi
+                        </dd>
+                      </div>
+                    ))}
                 </dl>
               )}
             </div>
@@ -309,6 +322,19 @@ export default function ReconcilePage() {
                       {breakdown.pjbInvalid} resi
                     </dd>
                   </div>
+                  {Object.entries(breakdown.byProduct)
+                    .filter(
+                      ([p, s]) =>
+                        !["PKH", "EC3", "PE", "PJB"].includes(p) && s.invalid > 0
+                    )
+                    .map(([p, s]) => (
+                      <div key={p} className="flex items-baseline justify-between gap-2">
+                        <dt className="font-semibold text-slate-600">{p} Invalid</dt>
+                        <dd className="font-extrabold text-red-700">
+                          {s.invalid} resi
+                        </dd>
+                      </div>
+                    ))}
                 </dl>
               )}
             </div>

@@ -344,6 +344,10 @@ describe("buildReconcileBreakdown", () => {
       pjbValid: 0,
       pjbInvalid: 0,
       unknownInvalid: 1,
+      byProduct: {
+        PKH: { valid: 4, invalid: 1 },
+        EC3: { valid: 2, invalid: 1 },
+      },
       duplicateResiRows: 0,
       duplicateResiGroups: 0,
     });
@@ -481,5 +485,109 @@ describe("validateReconcileRows — Rule 1b (DUPLICATE_RESI)", () => {
     ]);
     expect(counts.get("SHPE1")).toBe(2);
     expect(counts.has("")).toBe(false);
+  });
+});
+
+describe("layanan POS baru (3PE, 312, Q9, ...)", () => {
+  it("3PE menerima 3PE... dan CC..., menolak prefix asing", () => {
+    const ok = validateReconcileRows([
+      { produk: "3PE", nomor_resi: "3PE12345" },
+      { produk: "3pe", nomor_resi: "cc98765" },
+    ]);
+    expect(ok.rows.every((row) => row.isValid)).toBe(true);
+
+    const bad = validateReconcileRows([{ produk: "3PE", nomor_resi: "SHPE1" }]);
+    expect(bad.rows[0]?.code).toBe("PREFIX_MISMATCH");
+    expect(bad.rows[0]?.reason).toBe("Resi 3PE harus diawali 3PE atau CC");
+  });
+
+  it("312 menerima EE... (EMS UPU S10), menolak prefix asing", () => {
+    const ok = validateReconcileRows([
+      { produk: "312", nomor_resi: "EE123456789ID" },
+    ]);
+    expect(ok.rows.every((row) => row.isValid)).toBe(true);
+
+    const bad = validateReconcileRows([{ produk: "312", nomor_resi: "P26123" }]);
+    expect(bad.rows[0]?.code).toBe("PREFIX_MISMATCH");
+    expect(bad.rows[0]?.reason).toBe("Resi 312 harus diawali EE");
+  });
+
+  it("311/312 memakai EE, 331/332 memakai CP (data rekon riil)", () => {
+    const ok = validateReconcileRows([
+      { produk: "311", nomor_resi: "EE123456789ID" },
+      { produk: "312", nomor_resi: "EE987654321ID" },
+      { produk: "331", nomor_resi: "CP123456789ID" },
+      { produk: "331", nomor_resi: "cp000111222ID" },
+      { produk: "332", nomor_resi: "CP999888777MY" },
+    ]);
+    expect(ok.rows.every((row) => row.isValid)).toBe(true);
+
+    const bad = validateReconcileRows([
+      { produk: "311", nomor_resi: "311001" },
+      { produk: "312", nomor_resi: "P26123" },
+      { produk: "331", nomor_resi: "331001" },
+      { produk: "332", nomor_resi: "332001" },
+    ]);
+    expect(bad.rows.every((row) => row.code === "PREFIX_MISMATCH")).toBe(true);
+    expect(bad.rows[0]?.reason).toBe("Resi 311 harus diawali EE");
+    expect(bad.rows[2]?.reason).toBe("Resi 331 harus diawali CP");
+  });
+
+  it("layanan kode-produk memakai prefix kode sendiri (PPB_PKT, PJE, PJM, Q9, 010, 3LX, 3LP)", () => {
+    const cases: [string, string][] = [
+      ["PPB_PKT", "PPB001"],
+      ["PJE", "PJE001"],
+      ["PJM", "PJM001"],
+      ["Q9", "Q9001"],
+      ["010", "010001"],
+      ["3LX", "3LX001"],
+      ["3LP", "3LP001"],
+    ];
+    const ok = validateReconcileRows(
+      cases.map(([produk, nomor_resi]) => ({ produk, nomor_resi }))
+    );
+    expect(ok.rows.every((row) => row.isValid)).toBe(true);
+    expect(
+      ok.rows.every((row) => row.code !== "UNKNOWN_OR_INVALID_PRODUCT")
+    ).toBe(true);
+
+    const bad = validateReconcileRows(
+      cases.map(([produk]) => ({ produk, nomor_resi: "SALAH" }))
+    );
+    expect(bad.rows.every((row) => row.code === "PREFIX_MISMATCH")).toBe(true);
+  });
+
+  it("cakupan berkas longgar: 1 resi valid cukup, semua-salah menagih 1 issue", () => {
+    const ok = validateReconcileRows([
+      { produk: "3PE", nomor_resi: "CC1" },
+      { produk: "312", nomor_resi: "EE123456789ID" },
+      { produk: "Q9", nomor_resi: "Q91" },
+    ]);
+    expect(ok.rows.every((row) => row.isValid)).toBe(true);
+    expect(ok.fileIssues).toHaveLength(0);
+    expect(ok.isValid).toBe(true);
+
+    const incomplete = validateReconcileRows([{ produk: "Q9", nomor_resi: "XX1" }]);
+    expect(incomplete.fileIssues).toHaveLength(1);
+    expect(incomplete.fileIssues[0]).toMatchObject({
+      rule: "PRODUCT_PREFIX_COVERAGE",
+    });
+  });
+
+  it("breakdown.byProduct merangkum layanan baru; REG tetap UNKNOWN", () => {
+    const result = validateReconcileRows([
+      { produk: "3PE", nomor_resi: "CC1" },
+      { produk: "3PE", nomor_resi: "SALAH" },
+      { produk: "312", nomor_resi: "EE123456789ID" },
+      { produk: "REG", nomor_resi: "X1" },
+    ]);
+    const breakdown = buildReconcileBreakdown(result.rows);
+    expect(breakdown.byProduct).toMatchObject({
+      "3PE": { valid: 1, invalid: 1 },
+      "312": { valid: 1, invalid: 0 },
+    });
+    expect(breakdown.byProduct["REG"]).toBeUndefined();
+    expect(breakdown.unknownInvalid).toBe(1);
+    expect(result.rows[3]?.code).toBe("UNKNOWN_OR_INVALID_PRODUCT");
   });
 });

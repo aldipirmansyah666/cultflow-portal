@@ -81,6 +81,21 @@ export const SUPPORTED_PRODUCTS = [
   "TTSPOS",
   "PE",
   "PJB",
+  // Layanan resmi POS tambahan. Daftar prefix per produk di PRODUCT_PREFIXES;
+  // prefix bertanda DEFAULT memakai kode produk itu sendiri dan WAJIB
+  // dikonfirmasi ulang terhadap data rekon aktual bila ada mismatch massal.
+  "3PE", // Pos Ekspor: 3PE... / CC...
+  "312", // EMS Barang: EE... (format UPU S10)
+  "PPB_PKT",
+  "PJE",
+  "PJM",
+  "Q9",
+  "311",
+  "010",
+  "331",
+  "332",
+  "3LX",
+  "3LP",
 ] as const;
 export type SupportedProduct = (typeof SUPPORTED_PRODUCTS)[number];
 
@@ -95,6 +110,18 @@ const PRODUCT_PREFIXES: Record<SupportedProduct, readonly string[]> = {
   // berbeda antar produk, pecah array ini per produk di satu titik ini.
   PE: SHARED_PREFIXES_PKH_PJB_PE,
   PJB: SHARED_PREFIXES_PKH_PJB_PE,
+  "3PE": ["3PE", "CC"], // Pos Ekspor (data rekon)
+  "312": ["EE"], // EMS Barang (UPU S10)
+  PPB_PKT: ["PPB"], // DEFAULT: konfirmasi ke data rekon
+  PJE: ["PJE"], // DEFAULT: konfirmasi ke data rekon
+  PJM: ["PJM"], // DEFAULT: konfirmasi ke data rekon
+  Q9: ["Q9"], // DEFAULT: konfirmasi ke data rekon
+  "311": ["EE"], // EMS Dokumen (UPU S10, data rekon)
+  "010": ["010"], // DEFAULT: konfirmasi ke data rekon
+  "331": ["CP"], // Pos Paket Internasional (UPU S10 Colis, data rekon)
+  "332": ["CP"], // Pos Paket Internasional (UPU S10 Colis, data rekon)
+  "3LX": ["3LX"], // DEFAULT: konfirmasi ke data rekon
+  "3LP": ["3LP"], // DEFAULT: konfirmasi ke data rekon
 };
 
 function isSupportedProduct(value: string): value is SupportedProduct {
@@ -148,7 +175,7 @@ function formatPrefixList(prefixes: readonly string[]): string {
 }
 
 const UNKNOWN_PRODUCT_REASON =
-  "UNKNOWN_OR_INVALID_PRODUCT: produk tidak didukung (harus EC3, PKH, P260, TTSPOS, PE, atau PJB)";
+  `UNKNOWN_OR_INVALID_PRODUCT: produk tidak didukung (harus ${SUPPORTED_PRODUCTS.join(", ")})`;
 const DUPLICATE_RESI_REASON =
   "DUPLICATE_RESI: nomor resi ganda dalam berkas";
 
@@ -168,12 +195,13 @@ function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult 
   }
 
   if (!startsWithAny(nomorResi, PRODUCT_PREFIXES[produk])) {
+    const accepted = PRODUCT_PREFIXES[produk];
     const reason =
       produk === "EC3"
         ? "Resi EC3 harus diawali SHPE atau P26"
-        : produk === "PKH" || produk === "PJB" || produk === "PE"
+        : accepted === SHARED_PREFIXES_PKH_PJB_PE
           ? `Resi ${produk} harus diawali ${formatPrefixList(SHARED_PREFIXES_PKH_PJB_PE)}`
-          : `Resi ${produk} harus diawali ${[...PRODUCT_PREFIXES[produk]].join(" atau ")}`;
+          : `Resi ${produk} harus diawali ${[...accepted].join(" atau ")}`;
     return { index, produk, nomorResi, isValid: false, reason, code: "PREFIX_MISMATCH" };
   }
 
@@ -290,6 +318,23 @@ function checkFileCoverage(results: ReconcileRowResult[]): ReconcileFileIssue[] 
     });
   }
 
+  // Cakupan longgar generik untuk layanan lain (3PE, 312, Q9, ...):
+  // cukup SATU resi berproduk sama yang diawali SALAH SATU prefix yang
+  // diterima produk tersebut. EC3/PKH/P260/TTSPOS/PE/PJB ditangani di atas.
+  const STRICT_COVERAGE_PRODUCTS = new Set(["EC3", "PKH", "P260", "TTSPOS", "PE", "PJB"]);
+  for (const produk of SUPPORTED_PRODUCTS) {
+    if (STRICT_COVERAGE_PRODUCTS.has(produk)) continue;
+    if (
+      hasProduct(produk) &&
+      !PRODUCT_PREFIXES[produk].some((prefix) => hasResiPrefixFor(produk, prefix))
+    ) {
+      issues.push({
+        rule: "PRODUCT_PREFIX_COVERAGE",
+        message: `Berkas memuat produk ${produk} tetapi tidak ada resi ${produk} berprefix valid (${formatPrefixList(PRODUCT_PREFIXES[produk])})`,
+      });
+    }
+  }
+
   return issues;
 }
 
@@ -313,6 +358,12 @@ export interface ReconcileBreakdown {
   pjbInvalid: number;
   /** Baris produk tak dikenal (UNKNOWN_OR_INVALID_PRODUCT). */
   unknownInvalid: number;
+  /**
+   * Rincian generik per produk pendukung (termasuk layanan baru 3PE, 312,
+   * Q9, ...). Hanya produk yang muncul di berkas yang memiliki entri.
+   * Field bernama (pkhValid, peValid, ...) dipertahankan untuk kompatibilitas.
+   */
+  byProduct: Record<string, { valid: number; invalid: number }>;
   /** Baris yang nomor resinya muncul >1x dalam berkas. */
   duplicateResiRows: number;
   /** Grup resi ganda (jumlah nomor resi unik yang terduplikasi). */
@@ -345,6 +396,7 @@ export function buildReconcileBreakdown(
     pjbValid: 0,
     pjbInvalid: 0,
     unknownInvalid: 0,
+    byProduct: {},
     duplicateResiRows: 0,
     duplicateResiGroups: 0,
   };
@@ -357,6 +409,15 @@ export function buildReconcileBreakdown(
     }
   }
   for (const row of rows) {
+    if (!isSupportedProduct(row.produk)) {
+      // Produk tak dikenal selalu invalid (lihat validateRow) — hitung
+      // di sini agar tidak hilang dari agregat.
+      breakdown.unknownInvalid += 1;
+      continue;
+    }
+    const stat = (breakdown.byProduct[row.produk] ??= { valid: 0, invalid: 0 });
+    if (row.isValid) stat.valid += 1;
+    else stat.invalid += 1;
     if (row.produk === "PKH") {
       if (!row.isValid) {
         breakdown.pkhInvalid += 1;
@@ -399,11 +460,9 @@ export function buildReconcileBreakdown(
       } else {
         breakdown.pjbValid += 1;
       }
-    } else {
-      // Produk tak dikenal selalu invalid (lihat validateRow) — hitung
-      // di sini agar tidak hilang dari agregat.
-      breakdown.unknownInvalid += 1;
     }
+    // Produk pendukung lain (3PE, 312, Q9, ...): cukup tercatat di
+    // byProduct di atas; tidak ada counter bernama khusus.
   }
   return breakdown;
 }
