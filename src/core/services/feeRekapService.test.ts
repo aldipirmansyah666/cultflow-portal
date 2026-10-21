@@ -3,12 +3,14 @@ import {
   buildCariSlipText,
   buildFeeAgentProfile,
   buildFeeCsv,
+  buildFeeSlipText,
   buildPeriode,
   buildFullModuleBreakdown,
   buildModuleBreakdown,
   buildRincianText,
   CARI_MODULE_MAP,
   classifyFeeDbError,
+  computeTotalFee,
   deleteFeeRows,
   deriveLoketStatus,
   deriveRichStatus,
@@ -23,6 +25,7 @@ import {
   filterFeeRows,
   FEE_DELETE_MAX_IDS,
   fetchFeeList,
+  fetchAllFeeList,
   isCariSheetMatrix,
   isNontrivialFullParse,
   isPpidLike,
@@ -73,6 +76,66 @@ import {
   type FeeRekapRow,
   type LoketProfileFull,
 } from "./feeRekapService";
+
+describe("computeTotalFee (definisi tunggal TOTAL FEE = GROSS)", () => {
+  it("komponen periode: Bulan Ini + Bulan Sebelumnya + Subsidi", () => {
+    expect(
+      computeTotalFee({
+        feeBulanIni: 1_000_000,
+        feeBulanSebelumnya: 200_000,
+        subsidiAntarLoket: 50_000,
+      })
+    ).toBe(1_250_000);
+  });
+
+  it("kolom total fee (sumber utama) diutamakan atas komponen", () => {
+    expect(
+      computeTotalFee({
+        fee: 900_000,
+        feeBulanIni: 1_000_000,
+        feeBulanSebelumnya: 200_000,
+        subsidiAntarLoket: 50_000,
+      })
+    ).toBe(900_000);
+  });
+
+  it("fallback berurutan: fee -> komponen -> JUMLAH FEE -> 0", () => {
+    // fee kosong -> komponen dipakai.
+    expect(
+      computeTotalFee({
+        fee: 0,
+        feeBulanIni: 1_000_000,
+        jumlahFee: 777_000,
+      })
+    ).toBe(1_000_000);
+    // tanpa komponen -> JUMLAH FEE (kolom 191).
+    expect(computeTotalFee({ fee: 0, jumlahFee: 777_000 })).toBe(777_000);
+    // semuanya kosong -> 0 (bukan NaN/undefined).
+    expect(computeTotalFee({})).toBe(0);
+    expect(computeTotalFee({ fee: 0, feeBulanIni: 0 })).toBe(0);
+  });
+
+  it("TIDAK PERNAH mengurangi potongan/hold dari total", () => {
+    // Potongan tidak punya parameter di fungsi ini — tak ada jalur kode
+    // yang bisa menguranginya (potongan tetap di rincian terpisah).
+    const total = computeTotalFee({
+      feeBulanIni: 1_000_000,
+      feeBulanSebelumnya: 200_000,
+      subsidiAntarLoket: 50_000,
+    });
+    expect(total).toBe(1_250_000);
+  });
+
+  it("nilai tidak valid (NaN/Infinity) tidak meracuni total", () => {
+    expect(
+      computeTotalFee({
+        fee: Number.NaN,
+        feeBulanIni: 100_000,
+      })
+    ).toBe(100_000);
+    expect(computeTotalFee({ fee: Number.POSITIVE_INFINITY })).toBe(0);
+  });
+});
 
 describe("feeRekapService", () => {
   it("formatRupiah memakai format IDR", () => {
@@ -411,15 +474,38 @@ describe("normalizeHeaderCell + deteksi kolom", () => {
     expect(parsed.rows).toHaveLength(0);
   });
 
-  it("kolom potongan menjadi pengurang + rincian", () => {
+  it("kolom potongan TIDAK mengurangi total fee (GROSS) + tetap di rincian", () => {
     const matrix = [
       ["PPID", "Nama Loket", "Total Fee", "Potongan Admin", "Status"],
       ["SB-9", "Agen P", 1000000, 50000, "Pending"],
     ];
     const parsed = parseFeeRowsFromAOA(matrix, "2026-09", "t");
-    expect(parsed.rows[0]?.totalFee).toBe(950000);
+    // TOTAL FEE = fee BRUTO (definisi tunggal GROSS). Potongan hanya
+    // dicatat di rincian, tidak mengurangi total.
+    expect(parsed.rows[0]?.totalFee).toBe(1000000);
     expect(parsed.rows[0]?.rincian).toHaveLength(2);
+    expect(parsed.rows[0]?.rincian[0]?.nilai).toBe(1000000);
     expect(parsed.rows[0]?.rincian[1]?.nilai).toBe(-50000);
+    // Sisa = bruto + potongan ( transparan, tak memotong total).
+    const sisa = parsed.rows[0]!.rincian.reduce((s, d) => s + d.nilai, 0);
+    expect(sisa).toBe(950000);
+    expect(parsed.rows[0]?.auditFlag).toBeUndefined();
+  });
+
+  it("potongan yang melebihi fee bruto ditandai (tanpa mengurangi total)", () => {
+    const matrix = [
+      ["PPID", "Nama Loket", "Total Fee", "Potongan Admin"],
+      ["SB-10", "Agen Q", 100000, 150000],
+    ];
+    const parsed = parseFeeRowsFromAOA(matrix, "2026-09", "t");
+    // Total tetap bruto; selisih over-deduction hanya dilaporkan.
+    expect(parsed.rows[0]?.totalFee).toBe(100000);
+    expect(parsed.rows[0]?.auditFlag).toBe("OVER_DEDUCTED_POTONGAN");
+    expect(
+      parsed.rows[0]?.rincian.some((d) =>
+        d.label.includes("OVER_DEDUCTED_POTONGAN")
+      )
+    ).toBe(true);
   });
 });
 
@@ -933,6 +1019,43 @@ describe("normalisasi PPID kanonis (anti 'tidak ditemukan')", () => {
   });
 });
 
+describe("buildFeeSlipText (total bruto + netto terpisah)", () => {
+  it("potongan tidak mengurangi TOTAL; NETTO ditulis terpisah", () => {
+    const row: FeeRekapRow = {
+      id: "x",
+      ppid: "P1",
+      namaLoket: "Agen 1",
+      periode: "2026-08",
+      totalFee: 1_000_000,
+      status: "PENDING",
+      rincian: [
+        { label: "Total Fee", nilai: 1_000_000 },
+        { label: "Potongan Admin", nilai: -50_000 },
+      ],
+      updatedAt: "",
+    };
+    const text = buildFeeSlipText(row);
+    expect(text).toContain(`NETTO  : ${formatRupiah(950_000)} (setelah potongan)`);
+    expect(text).toContain(`TOTAL  : ${formatRupiah(1_000_000)} (bruto)`);
+  });
+
+  it("tanpa potongan tak ada baris NETTO", () => {
+    const row: FeeRekapRow = {
+      id: "x",
+      ppid: "P1",
+      namaLoket: "Agen 1",
+      periode: "2026-08",
+      totalFee: 750_000,
+      status: "TERBAYAR",
+      rincian: [{ label: "Total Fee", nilai: 750_000 }],
+      updatedAt: "",
+    };
+    const text = buildFeeSlipText(row);
+    expect(text).not.toContain("NETTO");
+    expect(text).toContain(`TOTAL  : ${formatRupiah(750_000)} (bruto)`);
+  });
+});
+
 describe("toFeeDbRow (mapping upsert anti Rp-0)", () => {
   it("PPID dikanonisasi + periode otoritatif + total_fee defensif", () => {
     const row = toFeeDbRow(
@@ -1389,6 +1512,124 @@ describe("fetchFeeList truncated", () => {
     const result = await fetchFeeList({ pageSize: 2000 });
     // 0 baris < total 5 -> terpotong.
     expect(result.truncated).toBe(true);
+  });
+});
+
+describe("fetchAllFeeList (ambil semua halaman dari server)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function row(ppid: string, total_fee: number) {
+    return {
+      id: ppid,
+      ppid,
+      nama_loket: `Loket ${ppid}`,
+      periode: "2026-08",
+      total_fee,
+      status: "TERBAYAR",
+      rincian: [],
+      updated_at: "2026-08-28T00:00:00Z",
+    };
+  }
+
+  it("mengiterate halaman sampai semua baris terkumpul", async () => {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        urls.push(u);
+        const page = Number(new URL(u, "http://x").searchParams.get("page") ?? 1);
+        const body =
+          page === 1
+            ? {
+                data: [row("A", 100), row("B", 200)],
+                total: 4,
+                page: 1,
+                pageSize: 1000,
+                totalPages: 2,
+                truncated: true,
+                periods: [],
+                summary: { totalLoket: 0, totalTerbayarAktif: 0, latestPeriode: "" },
+              }
+            : {
+                data: [row("C", 300), row("D", 400)],
+                total: 4,
+                page: 2,
+                pageSize: 1000,
+                totalPages: 2,
+                truncated: false,
+                periods: [],
+                summary: { totalLoket: 0, totalTerbayarAktif: 0, latestPeriode: "" },
+              };
+        return { ok: true, json: async () => body };
+      })
+    );
+    const res = await fetchAllFeeList({ periode: "2026-08" });
+    expect(res.data).toHaveLength(4);
+    expect(res.data.map((r) => r.ppid)).toEqual(["A", "B", "C", "D"]);
+    expect(res.total).toBe(4);
+    expect(res.truncated).toBe(false);
+    // Dua request: halaman 1 & 2 — filter diteruskan ke server.
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("periode=2026-08");
+    expect(urls[0]).toContain("pageSize=1000");
+  });
+
+  it("berhenti saat halaman kosong (tak looping tak terbatas)", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            data: [],
+            total: 9999,
+            page: 1,
+            pageSize: 1000,
+            totalPages: 10,
+            truncated: true,
+            periods: [],
+            summary: { totalLoket: 0, totalTerbayarAktif: 0, latestPeriode: "" },
+          }),
+        };
+      })
+    );
+    const res = await fetchAllFeeList({});
+    expect(calls).toBe(1);
+    expect(res.data).toHaveLength(0);
+    // Data tak lengkap -> truncated true (tidak diam-diam memotong).
+    expect(res.truncated).toBe(true);
+  });
+
+  it("batas maxPages dihormati (data sangat besar tidak meledakkan request)", async () => {
+    let calls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        calls += 1;
+        return {
+          ok: true,
+          json: async () => ({
+            data: [row(`P${calls}`, 1)],
+            total: 100_000,
+            page: calls,
+            pageSize: 1000,
+            totalPages: 100,
+            truncated: true,
+            periods: [],
+            summary: { totalLoket: 0, totalTerbayarAktif: 0, latestPeriode: "" },
+          }),
+        };
+      })
+    );
+    const res = await fetchAllFeeList({}, 3);
+    expect(calls).toBe(3);
+    expect(res.data).toHaveLength(3);
+    expect(res.truncated).toBe(true);
   });
 });
 
@@ -1927,7 +2168,7 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
     expect(aktif.details).toEqual([
       { modul: "PLN Postpaid", lembar: 56, feePerLembar: 2050, total: 114800 },
     ]);
-    // Baris ringkas monitoring konsisten (JUMLAH FEE 191 + rincian Master).
+    // Baris ringkas monitoring = profil Master (definisi GROSS tunggal).
     expect(rows[0]).toMatchObject({
       ppid: "53JCUM03186MJKSM",
       periode: "2026-08",
@@ -1935,6 +2176,14 @@ describe("Excel Master: Loket BSB penuh + sheet Cari", () => {
       status: "TERBAYAR",
     });
     expect(rows[0]?.profil?.ppid).toBe("53JCUM03186MJKSM");
+    // Unifikasi (regresi HIGH-3): baris monitoring dan profil WAJIB
+    // memakai ANGKA TOTAL FEE YANG SAMA — tak ada lagi definisi ke-3
+    // ("JUMLAH FEE" vs "Bulan Ini") yang bisa berbeda.
+    for (const row of rows) {
+      const profil = profiles.find((p) => p.ppid === row.ppid);
+      expect(profil).toBeDefined();
+      expect(row.totalFee).toBe(profil?.totalFee);
+    }
     const hold = profiles[1] as LoketProfileFull;
     expect(hold.hold).toBe(6100);
     expect(hold.feeSiapTransfer).toBe(0);

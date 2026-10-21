@@ -1,202 +1,588 @@
 # Laporan Audit Komprehensif: kurlog-portal-v2
 
-> Tanggal audit: 5 Oktober 2026 · Metode: seluruh temuan diverifikasi dengan membaca file langsung (`read`/`grep`, subagen read-only). Setiap temuan mencantumkan bukti `path:baris`. Stack: Next.js 16 + React 19 + Supabase + Tailwind v4 + exceljs (migrasi dari `xlsx`).
+> Tanggal audit: 21 Oktober 2026 · Metode: verifikasi manual terhadap kode yang berjalan (bukan menyalin laporan lama 5 Okt 2026 — seluruh temuan lama dicek ulang). Bukti selalu berbentuk `path:baris`. Perkiraan: 426 test lulus (26 file), `npm run lint` = 1 error + 8 warning, `npm run build` sukses.
+> Stack: Next.js 16 (App Router, `src/proxy.ts`) · React 19 · Supabase (PostgREST) · Tailwind v4 · exceljs · Vitest · TypeScript `strict`.
+
+## Status Perbaikan (diperbarui 21 Oktober 2026)
+
+| Temuan | Status | Bukti |
+|---|---|---|
+| **[HIGH-1]** Rekap fee > 1.000 baris tak terjangkau | ✅ **Fixed** | Paginasi + filter dipindah ke server: `src/app/fee-rekap/page.tsx:565-620` (`loadPage` kirim `q`+`periode`+`page`+`pageSize`), state `rows` = satu halaman server (`:441-457`), header ringkasan memakai `listTotal` dari DB (`:1740-1760`, `:2107-2111`), footer paginasi memakai `totalPages` server (`:2195-2205`). Client-side `filterFeeRows`/`paginateRows` dihapus dari halaman. Helper ekspor `fetchAllFeeList()` (`src/core/services/feeRekapService.ts:2240-2270`) mengambil SEMUA halaman agar ekspor/verifikasi tak terpotong. Ringkasan per-periode via RPC baru `loket_profiles_summary_for_period` / `fee_rekap_summary_for_period` (migrasi `supabase/migrations/20261009000000_fee_rekap_summary_per_period.sql`) → header sinkron dengan filter aktif. |
+| **[HIGH-2]** Auto-close resi false positive ("belum diterima") | ✅ **Fixed** | `src/core/services/resiService.ts:143-144` (regex negasi `AUTO_CLOSE_NEGATION_REGEX`) + `:158-167` (`isAutoCloseNote` veto negasi). Test regresi: `src/core/services/resiManage.test.ts:320-339` (12 kasus negasi + 4 positif). |
+| **[HIGH-3]** Tiga definisi `totalFee` (NET / GROSS / legacy) | ✅ **Fixed** | `src/core/services/feeRekapService.ts:452-503` — fungsi terpusat `computeTotalFee()` (GROSS: Bulan Ini + Bulan Sebelumnya + Subsidi, tanpa pengurangan potongan/hold). 9 call site: `:1514` (dinamis/absolut), `:1876` (readback `fee_loket`), `:1953` (readback `loket_profiles`), `:2077` (simpan `toFeeDbRow`), `:3148` + `:3218` (parser Master), `:3450` (sheet `Cari`), `:3803` (simpan profil), `:3892` (normalisasi impor), `:4008` (lookup profil). Test: `feeRekapService.test.ts` blok `computeTotalFee` + invariant "baris monitoring = profil" + slip NETTO/TOTAL. |
+| **[MEDIUM-1..10], [LOW-1..5]** | ⏳ Tertunda | — |
+
+> **Deploy note (HIGH-1)**: jalankan `supabase db push` agar migrasi `20261009000000_fee_rekap_summary_per_period.sql` terpasang. Tanpa itu, ringkasan pada header kembali ke agregat global (graceful fallback, tak ada error).
+
+> Catatan migrasi data: baris `fee_loket` lama yang disimpan dengan konvensi NET (hasil impor dinamis versi lama) perlu **re-import** agar `total_fee` konsisten GROSS; nilai yang sudah ada tidak diubah otomatis (readback memprioritaskan `total_fee` tersimpan).
 
 ## Ringkasan Eksekutif
 
-**Status kesehatan kode: 6/10 — fungsional tapi belum siap produksi tanpa perbaikan keamanan.**
+**Status kesehatan kode: 7,5/10 — sisi keamanan sudah kuat, sisi data-skala & konsistensi angka masih bermasalah.**
 
 | Area | Nilai | Kesimpulan |
 |---|---|---|
-| Keamanan & Database | 4/10 | 3 dari 8 tabel tanpa RLS + halaman browser query langsung via anon key = PII dapat dibaca publik tanpa login |
-| Logika bisnis | 6/10 | Perhitungan fee/resi umumnya benar (integer + clamp + audit), tapi ada inkonsistensi NET-vs-GROSS antar parser, auto-close resi over-match, dan aturan tanggal tanpa timezone |
-| Kualitas & performa React | 7/10 | Tidak ada memory leak / prop drilling; minus: tanpa `error.tsx` sama sekali, `catch` kosong menelan error sesi, halaman raksasa full-client |
+| Security & Data Integrity | 8/10 | RLS + GRANT service_role menutup semua tabel sensitif; otorisasi per-route + validasi input ketat. Sisa: rate-limit login rapuh, tanpa security header, CSV formula injection. |
+| Performance & Optimization | 6/10 | Rekap fee memuat 1.000 baris lalu memfilter/paginasi **di browser** → data di luar 1.000 baris tak terjangkau; ada N+1 (bagging) dan race condition fetch (data-utama, monitoring-resi). |
+| Code Quality & Architecture | 7/10 | Type safety bagus (strict, tanpa `any`), 423 test hijau, invariant akuntansi impor fee sangat baik. Sisa: `lint` merah, file 3.100+ baris. Definisi `totalFee` kini terpusat (`computeTotalFee`). |
 
-**5 hal yang harus diperbaiki sebelum rilis (urutan prioritas):**
+**Yang harus diperbaiki lebih dulu (urutan):**
 
-1. Nyalakan RLS + REVOKE untuk `data_lengkap_utama`, `resi`, `bailout` (atau pindahkan query browser ke API ber-sesi).
-2. Kunci `DELETE /api/resi` ke ADMIN + beri batas `ids[]` (saat ini USER biasa bisa hapus massal tanpa batas).
-3. Perbaiki/konfirmasi makna `totalFee` NET-vs-GROSS antar jalur parser fee.
-4. Perketat regex auto-close resi + tambah konfirmasi eksplisit (catatan "belum deliv" ikut menutup resi hari ini).
-5. Tambah `error.tsx` / `global-error.tsx` / `not-found.tsx` (saat ini crash = halaman blank).
-
----
-
-## A. Temuan Kritis / Bug Potensial
-
-### A1. Keamanan & Database
-
-**[KRITIS-1] Tiga tabel tanpa RLS, salah satunya berisi PII (KTP/NPWP/rekening)**
-
-- Bukti: `supabase/migrations/20260921000000_init_schema.sql:10` (`data_lengkap_utama`), `:106` (`resi`), `:123` (`bailout`) — tidak ada `ENABLE ROW LEVEL SECURITY` di file mana pun (terverifikasi via `grep`; hanya 5 tabel lain yang punya: `users` di `20260923000001_users_rls_lockdown.sql:11`, `fee_loket`+`fee_upload_logs` di `20260924000000_fee_loket.sql:54-55`, `loket_profiles`+`loket_transaction_details` di `20261002000000_loket_profiles_details.sql:89-90`). `CREATE POLICY`: nol di seluruh migrasi.
-- Dampak: dengan RLS mati, kunci anon publik + URL proyek cukup untuk membaca seluruh NIK (`no_ktp`), NPWP, nomor rekening, alamat, HP, email (`init_schema.sql:26-56`) tanpa login.
-
-**[KRITIS-2] Halaman browser query DB langsung dengan anon key, melewati sesi/role API**
-
-- Bukti: `src/app/data-utama/page.tsx:122-123,156` (`getSupabaseBrowser()` + `getDataUtamaList`), `src/app/lookup-agen/page.tsx:121,161`, `src/app/bagging/page.tsx:176`.
-- Dampak: gabungan dengan KRITIS-1 = eksposur publik riil, bukan teoretis. Otorisasi hanya hidup di application layer (`getSupabaseAdmin()` di semua API route — benar, tapi satu route lupa cek = akses penuh).
-
-**[HIGH-1] `DELETE /api/resi` boleh dilakukan role USER mana pun, tanpa batas jumlah**
-
-- Bukti: `src/app/api/resi/route.ts:168-172` (cek `getSession()` saja, tanpa `isAdminSession`); `route.ts:187-197` (`ids[]` tanpa cap). Bandingkan `DELETE /api/fee-rekap` yang ADMIN-only (`src/app/api/fee-rekap/route.ts:440-450`). Service punya `RESI_DELETE_MAX_IDS=2000` (`src/core/services/resiService.ts:638`) tapi route tidak menegakkannya → 500 generik, bukan 400/413.
-- Dampak: akun USER curian/rogue bisa menghapus massal data resi + import 500 baris (`route.ts:256-276` juga tanpa role check).
-
-**[HIGH-2] Rate-limit login in-memory + IP dari header yang bisa dipalsukan**
-
-- Bukti: `src/app/api/auth/login/route.ts:20-34` (`Map` per instance, tanpa eviksi, hilang saat restart/scale serverless); `route.ts:36-40` (`x-forwarded-for` dipercaya mentah). Tidak ada rate limit di route lain.
-- Dampak: bypass trivial dengan rotasi header; Map tumbuh tak terbatas (kebocoran memori lambat).
-
-**[MEDIUM-1] Tanpa CSRF token; satu-satunya pertahanan `SameSite=Lax`; GET ber-efek-samping**
-
-- Bukti: `src/lib/session.ts:88-97` (`httpOnly`, `sameSite:"lax"`, `secure` hanya produksi, tanpa prefix `__Host-`); tidak ada cek `Origin/Referer` di route mutasi; `GET /api/resi` memicu hapus data (`purgeExpiredResi` fire-and-forget, `src/app/api/resi/route.ts:63-68`) — navigasi top-level cross-site mengirim cookie Lax.
-- Dampak: CSRF klasik teredam Lax tapi tidak tertutup; token curian valid 24 jam penuh karena logout hanya hapus cookie (`src/app/api/auth/logout/route.ts:5-7`, tanpa revokasi server-side; `verifySessionToken` stateless di `session.ts:75-85`).
-
-**[MEDIUM-2] Inkonsistensi cek role + JWT secret lemah tetap dipakai**
-
-- Bukti: `src/app/api/data-utama/import/route.ts:21` (`session.role !== "ADMIN"` mentah) vs `isAdminSession()` di route lain; praktis aman karena normalisasi di `session.ts:81`, tapi rapuh. `getJwtSecret` (`session.ts:40-53`) hanya `console.warn` bila secret <32 char lalu tetap dipakai.
-- Dampak: rendah saat ini; risiko regresi saat token lama/format berubah.
-
-**[LOW] Sanitasi LIKE tidak setara standar antar service; info disclosure**
-
-- Bukti: fee punya `escapeFeeLike` lengkap (`src/core/services/feeRekapService.ts:126-135`), sedangkan resi (`resiService.ts:228-234`) dan data-utama hanya strip `[%_,()]` tanpa escape backslash/quotes. Pesan error membocorkan nama tabel/kode mesin (`MIGRATION_MISSING`, `fee-rekap/route.ts:200-208`).
-
-### A2. Logika Bisnis & Fitur
-
-**[HIGH-3] `totalFee` berarti NET di parser dinamis, GROSS di parser Master**
-
-- Bukti: `src/core/services/feeRekapService.ts:1326-1330` (`clampFeeTotal(fee + potongan)` = NET) vs `:2619-2684` (`parseLoketBsbFull`: `totalFee = feeBulanIni+feeBulanSebelumnya+subsidi` = GROSS) dan `:1643-1651`.
-- Dampak: loket `fee=1jt, minus=200rb` tersimpan `800rb` via jalur dinamis tapi `1jt` via Master; `receivedSum/storedSum` tidak sebanding antar jalur; laporan keuangan bisa selisih sistematis.
-
-**[HIGH-4] Prioritas kolom fee berbeda antar parser (absolut vs dinamis)**
-
-- Bukti: `feeRekapService.ts:869` (`[189,191,196]`) vs `:1113` (`[191,189]`, tanpa 196 = NET siap-transfer).
-- Dampak: file yang sama bisa menghasilkan angka berbeda tergantung jalur yang menang (`src/app/fee-rekap/page.tsx:909-919` fallback absolut→dinamis).
-
-**[HIGH-5] Regex auto-close resi over-match dan meng-override pilihan user diam-diam**
-
-- Bukti: `src/core/services/resiService.ts:126` (`/deliv|delivered|retur/i`), diterapkan di `:507-520,592-594`.
-- Dampak: catatan `"belum deliv, jangan tutup"`, `"tidak ada retur"`, bahkan `"return to sender"` (mengandung `retur`) dipaksa `SUDAH_FOLLOWUP + SELESAI + closed_at` tanpa pesan. Ini bug operasional nyata, bukan edge case.
-
-**[HIGH-6] API `upsert(onConflict:'ppid')` vs indeks parsial + CLI yang justru benar**
-
-- Bukti: `src/core/services/dataUtamaService.ts:795` vs indeks `WHERE ppid IS NOT NULL AND ppid <> ''` (`20260923000000_align_data_lengkap_utama_v2.sql:179-181`); CLI sadar masalah ini dan upsert manual (`src/scripts/importAgenCum.ts:12-16,461-516`). Komentar API (`data-utama/import/route.ts:4`) mengklaim "UNIQUE penuh di remote" — klaim ini tidak didukung migrasi.
-- Dampak: impor browser gagal `42P10` dengan pesan generik `"Impor gagal di server"`, sementara CLI sukses — membingungkan dan tampak seperti bug acak.
-
-**[HIGH-7] Dedup PPID case-sensitive + API buang tanpa-PPID sementara CLI insert**
-
-- Bukti: `agenCumMapper.ts:523-542` (tanpa normalisasi); `dataUtamaService.ts:781-786` (buang) vs `importAgenCum.ts:437-448` (insert).
-- Dampak: `"sbpos-001"` + `"SBPOS-001"` dianggap beda → violation/duplikat; impor ulang via CLI menggandakan baris tanpa-PPID yang via UI dibuang.
-
-**[MEDIUM-3] Filter tanggal resi naive-timezone vs dashboard yang benar (+07:00)**
-
-- Bukti: `resiService.ts:310-315` (`00:00:00`/`23:59:59.999` tanpa zona) vs `dashboardService.ts:48-56` (dengan `+07:00`).
-- Dampak: baris WIB `2026-09-22 06:00` (= `21T23:00Z`) hilang dari filter `startDate=2026-09-22`, atau sebaliknya bocor sehari.
-
-**[MEDIUM-4] Bailout: tidak ada `Asia/Jakarta` sama sekali; H-1 pakai zona lokal + input invalid jadi "kemarin" diam-diam**
-
-- Bukti: `bailoutMessage.ts:68-76,90-97` (local `setDate/getDay`), `bailoutParser.ts:360-361,367-371` (`toISOString` UTC); tidak ada cutoff jam — hanya teks `"sebelum pukul 09.00 WIB"` (`:120`). Input invalid jatuh ke `today-1` (`:95`) tanpa error.
-- Dampak: tengah malam WIB vs UTC bisa mundur sehari (`WIB 00:30` → tanggal UTC kemarin); redaksi Senin mencetak Minggu dengan template weekday (kontraintuitif tapi by-design — wajib didokumentasikan ke user).
-
-**[MEDIUM-5] Parser tanggal copas resi loloskan `30/02`, tahun `<2000` jadi "hari ini"**
-
-- Bukti: `resiService.ts:775-812` (cek `1-31` saja; `null` → DB default `current_date`).
-- Dampak: tanggal salah tersimpan sebagai hari ini tanpa warning; `"15/01/99"` jadi 2099.
-
-**[MEDIUM-6] Inkonsistensi kecil tapi nyata**
-
-- Dedup copas first-wins (parser `:862-866`) vs last-wins (service `:939-944`): preview tampil Agen A, tersimpan Agen B.
-- `toAbsoluteAmount` tanpa rounding vs `parseAmount` dengan rounding (`feeRekapService.ts:313-315` vs `:1090-1107`): drift Rp1 terakumulasi.
-- `parseAmount("1,000.00")` → `1` (salah 1000x, `:339-358`); desimal koma `,50` dibulatkan naik Rp1.
-- `buildModuleBreakdown` `Math.round(total/lembar)` (`:2556,2564`): `1000/3=333`, `333×3=999≠1000` di slip.
-- Reconcile: file hanya EC3/SHPE divonis invalid karena aturan cakupan mewajibkan `P26` juga; duplikat+prefix salah berbagi satu `code` (`reconcileValidator.ts:243-252,279-291`), filter UI kehilangan baris.
-- Bagging `"Belum  Dibagging"` (2 spasi) tidak dikenali (`baggingParser.ts:126-134` vs `:40-46`); alias `"STATUS"` generik false-positive (`:52-60`).
-- Dashboard `BAILOUT_SUM_LIMIT=5000` (`dashboardService.ts:27`) + `Number()||0` (`:87-100`) vs `parseAmount` fee (format `"1.500.000"` → `NaN` → 0).
-- Purge `<=cutoff` vs komentar `>2 hari` (`resiService.ts:136-190`); baris `closed_at=null AND followed_up_at=null` tak pernah terpurge; setiap GET memicu delete.
-
-### A3. Kualitas Kode & Performa
-
-**[HIGH-8] Tanpa `error.tsx` / `global-error.tsx` / `not-found.tsx` di seluruh app**
-
-- Bukti: `glob src/**/error.tsx` → tidak ada (terverifikasi). `layout.tsx:25` dan `page.tsx:122` tanpa pendamping; hanya `loading.tsx:16` yang ada.
-- Dampak: crash RSC/client = halaman blank/digest default; user tidak bisa recover.
-
-**[MEDIUM-7] `catch` kosong menelan kegagalan sesi di 6+ titik**
-
-- Bukti: `LayoutShell.tsx:45-47`, `Header.tsx:105-107`, `fee-rekap/page.tsx:384-386`, `data-utama/page.tsx:160-162,180-182`, `bagging/page.tsx:182-184`, `lookup-agen/page.tsx:125-128`.
-- Dampak: menu/token gagal tanpa sinyal; sulit debug; role bisa basi.
-
-**[MEDIUM-8] Bug role mentah di data-utama + `useEffect`/`setTimeout` tanpa cleanup**
-
-- Bukti: `data-utama/page.tsx:177` (`setRole` mentah) dicek `role==="ADMIN"` di `:327` → `"admin"` gagal buka Import (bandingkan normalisasi di `LayoutShell.tsx:43`). `setTimeout` tanpa ID di `fee-rekap/page.tsx:642`, `lookup-agen/page.tsx:196,239`, `bagging/page.tsx:161`, `bailout/page.tsx:141` → `setState` after unmount. Race suggest tanpa guard di `lookup-agen/page.tsx:116-134` (bandingkan pola `cancelled` di `fee-rekap:512-532`).
-- Dampak: sedang; tidak ada memory leak kronis (`grep setInterval` kosong; semua subscription ada cleanup; fetch hanya di efek/handler — baik).
-
-**[LOW] Lainnya (kebersihan)**
-
-- `feeRekapService.ts` ±3115 baris god-file + mock di kode produksi; `fee-rekap/page.tsx` ±2393 baris full-client (tanpa SSR tabel awal); `globals.css:22` menimpa font Geist dari `layout.tsx:6-13`; logo Sidebar unduh 1213px untuk tampil ±100px (`Sidebar.tsx:122-129`); `next.config.ts:3-5` kosong (tanpa header keamanan/CSP); file biner 7 file (±11 MB: 2 `.xlsx` + diagram) terlacak git tanpa di-ignore.
+1. **[HIGH] ✅ Fixed** Paginasi/filter rekap fee dipindah ke server (data > 1.000 baris sekarang terjangkau).
+2. **[HIGH] ✅ Fixed** Auto-close resi: veto negasi (`belum diterima`) — resi ditutup otomatis tanpa sepengetahuan petugas.
+3. **[HIGH] ✅ Fixed** Satu definisi tunggal `totalFee` untuk semua jalur parse (Master / dinamis / legacy).
+4. **[MEDIUM]** Filter tanggal dibuat timezone-aware (WIB) + race condition fetch di `data-utama` & `monitoring-resi`.
+5. **[MEDIUM]** Security header di `next.config.ts`, hardening rate-limit login, anti-formula pada export CSV.
 
 ---
 
-## B. Rekomendasi Perbaikan (dengan snippet)
+## A. Temuan — High
 
-**R1 — Tutup KRITIS-1 + KRITIS-2 (migrasi baru, pola sama seperti `users_rls_lockdown`):**
+### [HIGH-1] Rekap fee: seluruh data di luar 1.000 baris tidak pernah tampil & filter periode tidak bisa menjangkau
+
+- **Bukti**
+  - `src/app/fee-rekap/page.tsx:554-564` — muat awal: `fetchFeeList({ pageSize: 1000 })`, hasilnya disimpan utuh di state `dataset`.
+  - `src/app/fee-rekap/page.tsx:693-698` — filter & paginasi dilakukan **di browser**: `filterFeeRows(dataset, committedQuery, periode)` → `paginateRows(filtered, page, PAGE_SIZE)`.
+  - `src/app/fee-rekap/page.tsx:2043-2047` — banner peringatan: *"gunakan filter periode atau pencarian PPID untuk melihat sisanya"*.
+  - `src/app/api/fee-rekap/route.ts:29,31,39` — API **sudah** mendukung `page`, `pageSize` (cap `MAX_PAGE_SIZE=1000`) dan `periode` di DB.
+  - Komentar internal di `fee-rekap/page.tsx:441-445` dan `feeRekapService.ts` menyebut data 10.000+ baris.
+- **Mengapa bermasalah**
+  1. Tabel hanya berisi ≤ 1.000 baris pertama (diurut `periode DESC, ppid ASC`), sisanya tidak pernah di-query.
+  2. **Saran pada banner salah**: `filterFeeRows` bekerja pada `dataset` lokal. Memilih periode lain tidak menambah baris — ia hanya **memfilter** 1.000 baris yang sudah termuat. User bisa melihat "0 data" padahal datanya ada (baris itu di luar jendela 1.000).
+  3. `listTotal` (total DB) dipakai sebagai denominator pagination client-side → nomor halaman & jumlah baris tidak konsisten dengan isi tabel.
+  4. Total fee yang ditampilkan di kartu ringkasan berasal dari agregasi SQL (RPC) → **angka di header tidak cocok dengan jumlah baris tabel**; yangusers laparasi "kok total beda" cepat atau lambat.
+- **Dampak**: laporan keuangan periodik potentially salah/tidak lengkap; ekspor CSV/Excel memuat data parsial tanpa penanda tegas per baris.
+- **Perbaikan (before → after)**
+
+```ts
+// BEFORE — src/app/fee-rekap/page.tsx:554-564 + 693-698
+const [list, logList] = await Promise.all([
+  fetchFeeList({ pageSize: 1000 }),      // dataset ter-cap 1.000
+  fetchUploadLogs().catch(() => []),
+]);
+setDataset(list.data);                  // hanya 1.000 baris, sisanya hilang
+const filtered = useMemo(
+  () => filterFeeRows(dataset, committedQuery, periode),  // filter lokal
+  [dataset, committedQuery, periode]
+);
+const { pageRows, totalPages } = useMemo(
+  () => paginateRows(filtered, page, PAGE_SIZE),          // paginasi lokal
+  [filtered, page]
+);
+```
+
+```ts
+// AFTER — state digerakkan server (query, periode, page)
+const [dataset, setDataset] = useState<FeeRekapRow[]>([]);
+const [listTotal, setListTotal] = useState(0);
+const [totalPages, setTotalPages] = useState(1);
+
+const loadAll = useCallback(async () => {
+  setListLoading(true);
+  try {
+    const [list, logList] = await Promise.all([
+      // query + periode + page dikirim ke API; server yang memfilter
+      fetchFeeList({
+        q: committedQuery,
+        periode: periode === "SEMUA" ? undefined : periode,
+        page,
+        pageSize: 100,          // < PAGE_SIZE tabel, muat per halaman
+      }),
+      fetchUploadLogs().catch(() => []),
+    ]);
+    setDataset(list.data);
+    setListTotal(list.total);
+    setTotalPages(list.totalPages);
+    setLogs(logList);
+  } finally {
+    setListLoading(false);
+  }
+}, [committedQuery, periode, page]);
+
+// Tidak ada lagi filterFeeRows/paginateRows di sisi client untuk tabel.
+// filterFeeRows tetap dipakai untuk slip lokal (data yang SUDAH terambil).
+const { pageRows } = { pageRows: dataset };
+```
+
+> Catatan: `filterFeeRows`/`paginateRows` (service) tidak dihapus — dipakai ulang untuk slip/lookup lokal; yang dipindah adalah **sumber** tabel utama.
+
+### [HIGH-2] Auto-close resi salah menutup resi bercatatan "belum diterima"
+
+- **Bukti**
+  - `src/core/services/resiService.ts:129-130`
+    ```ts
+    export const AUTO_CLOSE_NOTE_REGEX =
+      /(?:^|[\s.,;:])(delivered|diterima(\s+paket)?|paket\s+(sudah\s+)?diterima|retur(\s+disetujui)?)(?=[\s.,;:!]|$)/i;
+    ```
+  - `resiService.ts:512-525` (path `updateFollowUpStatus`) dan `resiService.ts:596-600` (path `updateResiStatus`) memaksa `status_followup = SUDAH_FOLLOWUP`, `is_selesai = SELESAI`, `closed_at = now`.
+- **Mengapa bermasalah**: prefiks `(?:^|[\s.,;:])` hanya mensyaratkan batas kata, **bukan** makna. `"belum diterima"`, `"tidak diterima"`, `"resi belum diterima paket"` → regex tetap match kata `diterima` (didahului spasi) → resi **ditutup otomatis** meski petugas menyatakan belum sampai. Kata `retur` juga match `"belum retur"`.
+- **Dampak**: data follow-up resi ikut berubah tanpa konfirmasi; anschließ auto-purge `RESI_PURGE_AFTER_DAYS = 2` (`resiService.ts:141`) menghapus bukti tak lama. Ini merusak data operasional (bukan sekadar tampilan).
+- **Perbaikan (before → after)**
+
+```ts
+// BEFORE — resiService.ts:129-137
+export const AUTO_CLOSE_NOTE_REGEX =
+  /(?:^|[\s.,;:])(delivered|diterima(\s+paket)?|paket\s+(sudah\s+)?diterima|retur(\s+disetujui)?)(?=[\s.,;:!]|$)/i;
+
+export function isAutoCloseNote(catatan: string | null | undefined): boolean {
+  if (!catatan?.trim()) return false;
+  return AUTO_CLOSE_NOTE_REGEX.test(catatan);
+}
+```
+
+```ts
+// AFTER — negasi membatalkan auto-close + hanya frasa tegas yang menutup
+const NEGATION_REGEX =
+  /\b(belum|bukan|tidak|jangan|sedang|menunggu|proses|sebentar)\b/i;
+
+export const AUTO_CLOSE_NOTE_REGEX =
+  /(?:^|[\s.,;:])(delivered|diterima(\s+paket)?|paket\s+(sudah\s+)?diterima|retur(\s+disetujui)?)(?=[\s.,;:!]|$)/i;
+
+export function isAutoCloseNote(catatan: string | null | undefined): boolean {
+  if (catatan === null || catatan === undefined || catatan.trim() === "") return false;
+  // Negasi eksplisit = Dynamics of truth; tak boleh ditutup otomatis.
+  if (NEGATION_REGEX.test(catatan)) return false;
+  return AUTO_CLOSE_NOTE_REGEX.test(catatan);
+}
+```
+
+> Tambahan: `updateResiStatus` (`resiService.ts:596-600`) memaksa `SELESAI` walau user memilih status lain — gunakan status pilihan user sebagai sumber utama dan auto-close hanya bila status == `SUDAH_FOLLOWUP` **dan** user tidak memilih status lain.
+
+### [HIGH-3] Tiga definisi berbeda untuk `totalFee` (NET vs GROSS vs "jumlah fee")
+
+- **Bukti**
+  - Parser dinamis — `src/core/services/feeRekapService.ts:1433`
+    ```ts
+    const clamped = clampFeeTotal(fee + totalPotongan);   // NET (potongan dikurangi)
+    ```
+  - Parser Master — `feeRekapService.ts:3030` (dan duplikat `:3320`)
+    ```ts
+    const totalFee = feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket; // GROSS
+    ```
+  - Baris legacy — `feeRekapService.ts:3094`
+    ```ts
+    const rawTotal = jumlahFee !== 0 ? jumlahFee : feeBulanIni;  // definisi ketiga
+    ```
+  - Baca ulang dari DB — `feeRekapService.ts:1844-1848`: bila `total_fee = 0`, dihitung ulang `feeBulanIni + feeBulanSebelumnya + subsidi` (GROSS) → **angka 0 yang sah berubah jadi 0-ish lain**.
+  - Simpan — `feeRekapService.ts:1962-1966` menyimpan `clamped.total` (hasil definisi dinamis/NET) ke kolom `total_fee`, yang kemudian dibaca sebagai "Master" (GROSS) di `toFeeRekapRowFromProfil`.
+- **Mengapa bermasalah**: file Excel yang sama bisa menghasilkan total berbeda tergantung jalur mana yang menang (Master sheet vs sheet lain vs legacy), dan `total_fee` di DB Stores campur dua definisi. Verifikasi pasca-impor (`receivedSum` vs `storedSum`) jadi tidak sebanding dengan angka slip.
+- **Dampak**: selisih sistematis antar laporan; slip keuangan ke agen berpotensi salah nominal; `feeSiapTransfer` (kolom 196) yang sebenarnya nilai transfer pun tidak jadi acuan.
+- **Perbaikan (before → after)**
+
+```ts
+// BEFORE — definisi tersebar di 4 tempat
+// dynamic:  clampFeeTotal(fee + totalPotongan)
+// master:   feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket
+// legacy:   jumlahFee !== 0 ? jumlahFee : feeBulanIni
+// readback: total_fee === 0 ? (bulanIni + bulanLalu + subsidi) : total_fee
+```
+
+```ts
+// AFTER — satu sumber kebenaran di src/core/services/feeRekapService.ts
+/** TOTAL FEE = fee bruto periode INI (tanpa potongan) — GROSS, sesuai
+ *  kolom "Total Fee" pada slip Master. Potongan dipisahkan di rincian. */
+export function computeTotalFee(input: {
+  feeBulanIni: number;
+  feeBulanSebelumnya: number;
+  subsidiAntarLoket: number;
+  jumlahFee?: number;
+}): number {
+  const gross =
+    feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket;
+  // Fallback hanya bila komponen kosong semua (baris legacy tak punya
+  // rincian periode) — TIDAK saat total sengaja nol.
+  if (gross === 0 && (input.jumlahFee ?? 0) !== 0) return input.jumlahFee;
+  return gross;
+}
+
+// Pemakaian (semua parser & readback):
+const totalFee = clampFeeTotal(computeTotalFee({...})).total;
+// Rincian tetap memuat potongan/hold/transfer secara terpisah
+// (tidak lagi "dikurangi" dari total).
+```
+
+---
+
+## B. Temuan — Medium
+
+### [MEDIUM-1] Filter tanggal resi tidak timezone-aware (geser 7 jam)
+
+- **Bukti**: `src/core/services/resiService.ts:309-321`
+  ```ts
+  if (startDate !== null) query = query.gte("created_at", `${startDate}T00:00:00`);
+  if (endDate !== null)   query = query.lte("created_at", `${endDate}T23:59:59.999`);
+  ```
+  `created_at` adalah `timestamptz`; string tanpa offset ditafsirkan **UTC**, sedangkan operasi aplikasi berjalan WIB (UTC+7).
+- **Dampak**: laporan harian kehilangan data 00:00–06:59 WIB (tidak masuk `gte`), dan menyertakan sisa hari sebelumnya 17:00–23:59 UTC. Selisih 7 jam per hari tanpa error.
+- **Perbaikan**
+
+```ts
+// BEFORE — naive local time
+query = query.gte("created_at", `${startDate}T00:00:00`);
+query = query.lte("created_at", `${endDate}T23:59:59.999`);
+```
+
+```ts
+// AFTER — batas hari WIB dikonversi eksplisit ke UTC
+const APP_TZ_OFFSET_MIN = 7 * 60; // Asia/Jakarta (WIB, tanpa DST)
+function dayStartUtc(date: string): string {
+  return new Date(`${date}T00:00:00+07:00`).toISOString();
+}
+function dayEndUtc(date: string): string {
+  return new Date(`${date}T23:59:59.999+07:00`).toISOString();
+}
+if (startDate !== null) query = query.gte("created_at", dayStartUtc(startDate));
+if (endDate !== null)   query = query.lte("created_at", dayEndUtc(endDate));
+```
+
+### [MEDIUM-2] Race condition pada fetch daftar (data-utama & monitoring-resi)
+
+- **Bukti**
+  - `src/app/data-utama/page.tsx:118-153` — `fetchPage` tanpa `AbortController`/sequence guard; `setRows(...)`/`setTotal(...)` dipanggil apa adanya.
+  - `src/app/monitoring-resi/page.tsx:194-224` — pola sama.
+  - `src/app/fee-rekap/page.tsx:670-690` — sudah memakai pola `cancelled` (good) → bisa diseragamkan.
+- **Mengapa bermasalah**: request lama yang lambat bisa selesai **setelah** request baru → respons basi menimpa data terbaru (user melihat hasil filter sebelumnya). `setState` setelah unmount juga memicu warning/GB.
+- **Dampak**: data yang ditampilkan tidak sesuai filter aktif; laporan/copy-paste dari UI bisa salah.
+- **Perbaikan**
+
+```ts
+// BEFORE — data-utama/page.tsx:118-153
+const fetchPage = useCallback(async () => {
+  setLoading(true);
+  const res = await fetch(`/api/data-utama?${params}`);
+  const body = await res.json();
+  setRows(body.data ?? []);   // bisa menimpa respons basi
+  setTotal(body.total ?? 0);
+}, [debouncedSearch, regional, page]);
+```
+
+```ts
+// AFTER — sequence guard + AbortController
+const requestSeq = useRef(0);
+
+const fetchPage = useCallback(async () => {
+  const seq = ++requestSeq.current;
+  const ac = new AbortController();
+  setLoading(true);
+  try {
+    const res = await fetch(url, { signal: ac.signal });
+    const body = await res.json();
+    if (seq !== requestSeq.current) return;   // ada request lebih baru → abaikan
+    setRows(body.data ?? []);
+    setTotal(body.total ?? 0);
+  } catch (err) {
+    if (ac.signal.aborted) return;
+    setError(err instanceof Error ? err.message : "Gagal memuat data.");
+  } finally {
+    if (seq === requestSeq.current) setLoading(false);
+  }
+}, [...]);
+
+// pemanggil: biarkan request lama dibatalkan saat dependency berubah
+useEffect(() => {
+  void fetchPage();
+  return () => requestSeq.current++;   // batalkan versi lama
+}, [fetchPage]);
+```
+
+### [MEDIUM-3] CSV/Excel export rentan formula injection
+
+- **Bukti**: `src/core/services/feeRekapService.ts:1490-1509`
+  ```ts
+  function csvEscape(value: string): string {
+    if (/[";\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+    return value;
+  }
+  export function buildFeeCsv(rows: FeeRekapRow[]): string { ... }
+  ```
+  Nilai `ppid`/`nama_loket` berasal dari file Excel hasil impor (`feeRekapService.ts:1971-1977` — `cleanFeeStr` hanya trim + potong panjang, **tidak** menetralkan prefix formula).
+- **Mengapa bermasalah**: nilai yang diawali `=`, `+`, `-`, `@` (atau `TAB`/`CR`) akan dieksekusi sebagai formula saat CSV dibuka di Excel/LibreOffice/Sheets — bisa jadi `HYPERLINK`/`WEBSERVICE` untuk exfiltrasi data.
+- **Dampak**: file ekspor milik admin bisadieksekusi di mesin penerima (recipient adalah Mitr(a)/agen).
+- **Perbaikan**
+
+```ts
+// BEFORE
+function csvEscape(value: string): string {
+  if (/[";\n\r]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+  return value;
+}
+```
+
+```ts
+// AFTER — prefix formula dinetralkan + pemisah aman
+const FORMULA_PREFIX = /^[=+\-@\t\r]/;
+
+function csvEscape(value: string): string {
+  let v = value;
+  if (FORMULA_PREFIX.test(v)) v = `'${v}`;   // Excel: teks, bukan formula
+  if (/[";\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
+}
+```
+> Terapkan juga pada `buildRincianText` (TSV) dan `downloadAoaAsXlsx` (`src/lib/excel.ts`) — pastikan sel ditulis sebagai tipe string.
+
+### [MEDIUM-4] N+1 request di halaman bagging
+
+- **Bukti**: `src/app/bagging/page.tsx:167-181` — satu `fetch("/api/data-utama/lookup?q=...")` **per agen** di dalam `Promise.all` tanpa batas konkurensi; tiap request menyentuh DB lewat service_role.
+- **Dampak**: 50 agen = 50 request paralel ke route handler → cold start serverless, spike koneksi PostgREST, dan rate-limit platform bisaigan. Buka halaman bagging berulang = beban tidak proporsional.
+- **Perbaikan**
+
+```ts
+// BEFORE — N+1 ke server
+const entries = await Promise.all(
+  agenKeys.map(async (name) => {
+    const res = await fetch(`/api/data-utama/lookup?q=${encodeURIComponent(name)}`);
+    ...
+  })
+);
+```
+
+```ts
+// AFTER — satu endpoint batch + batas konkurensi
+// API baru: POST /api/data-utama/phones { names: string[] } -> { [nama]: noHp }
+const res = await fetch("/api/data-utama/phones", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ names: agenKeys }),
+});
+const map = (await res.json()) as Record<string, string>;
+setAgenPhones(Object.fromEntries(agenKeys.map((n) => [n, normalizeWaNumber(map[n] ?? "")])));
+```
+> Bila endpoint batch takразу tersedia: query server-side `in` filter satu kali (`dataUtamaService.getPhonesByNames`) daripada lookup per nama.
+
+### [MEDIUM-5] Rate-limit login rapuh: per-instance, berbasis header yang bisa dipalsukan, Map tanpa eviksi
+
+- **Bukti**: `src/app/api/auth/login/route.ts:17-40`
+  ```ts
+  const attempts = new Map<string, { count: number; resetAt: number }>();
+  function getClientIp(req: Request) {
+    const forwarded = req.headers.get("x-forwarded-for");
+    if (forwarded) return forwarded.split(",")[0]?.trim() || "unknown";
+    ...
+  }
+  ```
+  - `Map` berada di memori instance → hilang saat restart, tidak berbagi antar instance (serverless = multi-instance).
+  - `X-Forwarded-For` tepercaya apa adanya → rotasi header melewati limit.
+  - Tidak pernah ada sweep entri kedaluwarsa → **pertumbuhan memori tak terbatas** (kartel DoS ringan).
+  - Limit dihitung **sebelum** validasi kredensial & juga berlaku untuk login sukses (entry dihitung lalu dibiarkan).
+- **Perbaikan**
+
+```ts
+// AFTER — key = username+IP, evicts berkala, pasang limit hanya pada kegagalan
+const attempts = new Map<string, { count: number; resetAt: number }>();
+const WINDOW_MS = 60_000, MAX = 5;
+
+function sweep(now: number) {
+  for (const [k, v] of attempts) if (now > v.resetAt) attempts.delete(k);
+}
+function rateLimitKey(req: Request, username: string) {
+  // Ambil IP dari header platform tepercaya (Vercel: x-vercel-forwarded-for / x-real-ip),
+  // JANGAN pakai X-Forwarded-For mentah.
+  const ip = req.headers.get("x-real-ip") ?? req.headers.get("x-vercel-forwarded-for") ?? "unknown";
+  return `${ip}|${username.toLowerCase()}`;
+}
+function isRateLimited(key: string): boolean {
+  const now = Date.now();
+  if (attempts.size > 1000) sweep(now);
+  const e = attempts.get(key);
+  if (!e || now > e.resetAt) { attempts.set(key, { count: 1, resetAt: now + WINDOW_MS }); return false; }
+  e.count += 1;
+  return e.count > MAX;
+}
+```
+> Produksi multi-instance: pakai store bersama (Upstash/Redis/Postgres) — limit in-memory hanya lapisan pertama.
+
+### [MEDIUM-6] Tidak ada security header (CSP/HSTS/frame-options)
+
+- **Bukti**: `next.config.ts:3-5` — `const nextConfig: NextConfig = { /* config options here */ };` (kosong). Tidak ada `headers()` di seluruh repo (grep `Content-Security-Policy` → hanya `AUDIT-REPORT.md`).
+- **Dampak**: tanpa `X-Frame-Options`/CSP →.clickjacking; tanpa `nosniff` → MIME sniffing; tanpa HSTS → downgrade HTTP.
+- **Perbaikan**
+
+```ts
+// AFTER — next.config.ts
+const securityHeaders = [
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+  { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
+  // Mulai dari Report-Only supaya inline script Next tidak langsung patah:
+  { key: "Content-Security-Policy-Report-Only", value:
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co; frame-ancestors 'none'; base-uri 'self'" },
+];
+
+const nextConfig: NextConfig = {
+  async headers() {
+    return [{ source: "/:path*", headers: securityHeaders }];
+  },
+};
+```
+
+### [MEDIUM-7] `npm run lint` gagal (2 error) — belum ada gate CI
+
+- **Bukti**:
+  - `src/app/fee-rekap/page.tsx:730` — `setServerSearching(true)` dipanggil sinkron di dalam `useEffect` → error `react-hooks/set-state-in-effect`.
+  - `src/app/reconcile/page.tsx:211` — karakter `"` mentah → error `react/no-unescaped-entities`.
+  - 8 warning (unused var di `src/app/api/fee-rekap/import/route.ts:182`, missing dep `src/app/user-management/page.tsx:123`, dll).
+  - Tidak ada `.github/workflows` → lint/test tidak pernah dijalankan otomatis.
+- **Perbaikan**
+
+```tsx
+// BEFORE — fee-rekap/page.tsx:726-742
+useEffect(() => {
+  const q = committedQuery.trim();
+  if (q === "" || listLoading || localProfile) return;
+  let cancelled = false;
+  setServerSearching(true);            // <-- setState sinkron di efek
+  (async () => { ... })();
+  return () => { cancelled = true; };
+}, [committedQuery, listLoading, localProfile]);
+```
+
+```tsx
+// AFTER — status searching di-set di event handler (tempat commit query)
+function startLookup() {
+  setServerSearching(true);            // dipanggil dari handler/debounce
+  setCommittedQuery(search.trim());
+  setPage(1);
+}
+useEffect(() => {
+  const q = committedQuery.trim();
+  if (q === "" || listLoading || localProfile) return;
+  let cancelled = false;
+  (async () => { ... })();             // tanpa setState sinkron
+  return () => { cancelled = true; };
+}, [committedQuery, listLoading, localProfile]);
+```
+```tsx
+// reconcile/page.tsx:211 — gunakan entitas HTML
+<p>&quot;{nama}&quot; tidak ditemukan</p>
+```
+> Tambah `.github/workflows/ci.yml`: `npm ci` → `npm run lint` → `npm test` → `npm run build` (gate wajib).
+
+### [MEDIUM-8] Import resi: TOCTOU + tidak ada unique index `nomor_resi`
+
+- **Bukti**: `src/core/services/resiService.ts:933-1000` — pola `SELECT nomor_resi` (chunk 500) → pisahkan insert/update → `INSERT` tanpa `onConflict`. Migrasi `supabase/migrations/20261008000000_resi_datautama_perf_indexes.sql:88-91` hanya membuat index **GIN trigram** (bukan unique) → tidak ada constraint unik.
+- **Dampak**: dua import paralel (mis. dua petugas) bisa memasukkan nomor resi sama → duplikat; laporan follow-up ganda, auto-purge salah sasaran.
+- **Perbaikan**
 
 ```sql
--- supabase/migrations/20261006000000_pii_rls_lockdown.sql
-ALTER TABLE public.data_lengkap_utama ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.resi ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.bailout ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.data_lengkap_utama, public.resi, public.bailout FROM anon, authenticated;
-GRANT ALL ON public.data_lengkap_utama, public.resi, public.bailout TO service_role;
-GRANT ALL ON public.data_lengkap_utama, public.resi, public.bailout TO postgres;
+-- AFTER — migrasi baru
+create unique index if not exists idx_resi_nomor_resi_uniq
+  on public.resi (nomor_resi)
+  where nomor_resi is not null;
 ```
+```ts
+// AFTER — resiService.ts (ganti SELECT-then-INSERT dengan upsert atomik)
+const { error } = await client
+  .from("resi")
+  .upsert(payloads, { onConflict: "nomor_resi", ignoreDuplicates: false })
+  .select("id");
+```
+> Bila duplikat lama masih ada, jalankan dedup sebelum membuat index unik.
 
-Lalu pindahkan `getDataUtamaList`/`lookup-agen`/`bagging` dari `getSupabaseBrowser()` ke API route ber-sesi (pola `fee-rekap/route.ts:148`). Jika query browser harus tetap, buat `CREATE POLICY` selektif per `auth.uid()`, bukan akses service_role dari browser.
+### [MEDIUM-9] `parseCopasDate` menerima tanggal kalender tidak valid
 
-**R2 — Kunci resi (HIGH-1): tambah guard + cap di `src/app/api/resi/route.ts:168`:**
+- **Bevidence**: `src/core/services/resiService.ts:781-820` — validasi hanya `day 1..31`, `mon 1..12`, `year 2000..2100` → `31/04/2026` diterima (diformat `2026-04-31`).
+- **Dampak**: nilai tak valid diteruskan ke DB (kolom `date`) → Postgres menolak `2026-04-31` dengan error 22008 → satu baris buruk menggagalkan **seluruh** batch import (tidak ada validasi kalender per baris di layer aplikasi).
+- **Perbaikan**
 
 ```ts
-import { getSession, isAdminSession } from "@/lib/session";
-import { RESI_DELETE_MAX_IDS } from "@/core/services/resiService";
-const session = await getSession();
-if (!session) return NextResponse.json({ error: "Tidak terautentikasi" }, { status: 401 });
-if (!isAdminSession(session)) return NextResponse.json({ error: "Hanya ADMIN" }, { status: 403 });
-if (list.length > RESI_DELETE_MAX_IDS) return NextResponse.json({ error: `Maksimal ${RESI_DELETE_MAX_IDS} id` }, { status: 413 });
+// AFTER — validasi kalender nyata
+const daysInMonth = new Date(Date.UTC(year, mon, 0)).getUTCDate();
+if (day < 1 || day > daysInMonth || mon < 1 || mon > 12) return null;
 ```
+> Tambahkan juga: `importResiBatch` menolak baris tak valid per-baris (skip + laporkan) alih-alih menggagalkan seluruh batch.
 
-Samakan `data-utama/import/route.ts:21` menjadi `if (!isAdminSession(session))`.
+### [MEDIUM-10] Struktur monolitik → Separation of Concerns
 
-**R3 — Rate limit + JWT (HIGH-2, MEDIUM-1):** pindah ke store persisten (Upstash/Supabase) dengan kunci `IP+username`, hanya percaya `x-forwarded-for` dari proxy tepercaya; tolak `JWT_SECRET` <32 char (throw, bukan warn); tambah tabel `revoked_tokens(jti)` + cek di `verifySessionToken`; tambah cek `Origin/Referer` untuk mutasi; pindahkan `purgeExpiredResi` dari `GET` ke cron/endpoint ADMIN eksplisit.
-
-**R4 — Samakan makna uang fee (HIGH-3, HIGH-4, MEDIUM-6):** tetapkan kontrak tunggal — mis. `totalFee` = NET setelah potongan; perbaiki `parseLoketBsbFull` (`feeRekapService.ts:2619`) memakai `clampFeeTotal` seperti `:1329`; samakan prioritas kolom `[189,191,196]` di kedua parser; bulatkan di satu tempat (`parseAmount`); ganti `Math.round(total/lembar)` dengan pembagian sisa (`feeDasar=floor`, sisa dialokasikan ke baris pertama) agar `lembar×fee=total` persis; validasi `total == sum(rincian)` di `toFeeDbRow`.
-
-**R5 — Auto-close resi (HIGH-5): persempit regex + wajibkan konfirmasi:**
-
-```ts
-export const AUTO_CLOSE_NOTE_REGEX = /(^|[\s.,;:])(delivered|diterima(\s+paket)?|paket\s+(sudah\s+)?diterima|retur(\s+disetujui)?)(?=[\s.,;:!]|$)/i;
-```
-
-dan jangan override diam-diam — kembalikan `needsConfirm: true` ke klien bila auto-close terpicu, atau catat `autoClosedByRule` di respons.
-
-**R6 — Data-utama vs CLI (HIGH-6, HIGH-7):** buat `UNIQUE(ppid)` penuh (non-parsial) bila memungkinkan, atau samakan API ke pola CLI (SELECT→UPDATE+INSERT); normalisasi PPID (`trim().toUpperCase()`, collapse spasi) sebelum `dedupeByPpid`; samakan kebijakan tanpa-PPID (buang di keduanya + laporkan `skippedNoPpid`).
-
-**R7 — Tanggal (MEDIUM-3, MEDIUM-4, MEDIUM-5): gunakan satu helper zona:**
-
-```ts
-const dayStartWib = (d: string) => `${d}T00:00:00+07:00`;
-query = query.gte("created_at", dayStartWib(startDate)).lte("created_at", `${endDate}T23:59:59.999+07:00`);
-```
-
-untuk bailout: `sanitizePeriodeOrToday` pakai `Asia/Jakarta` (`Intl.DateTimeFormat` + `timeZone`, pola yang sudah benar di `resiService.ts:393-409`), dan throw untuk input invalid alih-alih fallback kemarin. Validasi kalender nyata untuk `parseCopasDate` (tolak `30/02`, putuskan aturan tahun 2-digit secara eksplisit).
-
-**R8 — Error boundaries + catch kosong (HIGH-8, MEDIUM-7):** tambah `src/app/error.tsx` (`"use client"` + tombol `reset()`), `global-error.tsx`, `not-found.tsx`; ganti `catch {}` dengan `console.warn("[auth/me] failed", err)` + state error terlihat; normalisasi role di `data-utama/page.tsx:177` (`setRole(body.user.role.trim().toUpperCase())`); beri `requestIdRef`/flag `cancelled` pada suggest `lookup-agen` dan cleanup `setTimeout` via `useRef`.
-
-**R9 — Kebersihan rilis:** keluarkan 7 file biner dari git (`git rm --cached *.xlsx diagram.*` + tambahkan ke `.gitignore`, putar data PII yang terlanjur ter-push); tambah header keamanan di `next.config.ts` (CSP/HSTS/`X-Frame-Options`); pecah `feeRekapService.ts` dan halaman fee-rekap menjadi island client; netralisasi awalan `=,+,-,@` saat export Excel (CSV-formula injection).
+- **Bukti**: `src/app/fee-rekap/page.tsx` = **3.102 baris** (state, upload/parse, tabel, modal slip, ekspor, cetak); `src/core/services/feeRekapService.ts` = **3.956 baris** (parser Excel, normalisasi, agregasi, mapping, API client).
+- **Mengapa bermasalah**: logika bisnis (kritik[al] fee, normalisasi PPID) masih menyentuh UI; duplikasi nyata: `filterFeeRows`/`paginateRows` dipakai untuk logika yang semestinya server-side, `buildFeeAgentProfile` dipanggil di 3 tempat dengan parameter berbeda; sulit diuji unit per bagian.
+- **Perbaikan** — pecah tanpa mengubah kontrak:
+  - `src/core/services/fee/parser/parseLoketBsb.ts` (parse Master)
+  - `src/core/services/fee/parser/parseDynamic.ts` (parse dinamis)
+  - `src/core/services/fee/normalize.ts` (`normalizePpid`, `computeTotalFee`, `clampFeeTotal`)
+  - `src/core/services/fee/api.ts` (client API: `fetchFeeList`, `saveFeeImport`, `deleteFeeRows`, `dropAllFeeData`)
+  - `src/app/fee-rekap/_components/{FeeTable,SlipModal,ImportPanel,FeeFilters}.tsx` (UI murni, props-typed)
+  - Semua helper yang sudah diuji di `feeRekapService.test.ts` (413 test) bisa dipindah tanpa mengubah API publik.
 
 ---
 
-## Pertanyaan klarifikasi
+## C. Temuan — Low
 
-1. Apakah `DELETE/POST/PATCH /api/resi` memang boleh untuk USER, atau harus ADMIN seperti fee?
-2. Kontrak `totalFee`: NET setelah potongan, atau GROSS komponen? Ini menentukan arah perbaikan HIGH-3.
-3. Apakah aturan H-1 bailout + template weekend/weekday yang mengikuti tanggal *redaksi* (bukan tanggal cetak) sudah disepakati bisnis?
-4. Target deploy (VPS Docker vs Vercel serverless)? Menentukan desain rate-limit dan `maxDuration` impor.
+### [LOW-1] Opsi regional terpotong diam-diam (limit 5.000 vs cap PostgREST 1.000)
+- `src/core/services/dataUtamaService.ts:489-497` memakai `.limit(5000)`, sedangkan `max_rows` PostgREST = 1.000 →zzat lebih dari 1.000 baris terpotong **tanpa indikator**, dan distinct filtering dilakukan di JS.
+- Perbaikan: `select("regional").limit(1000)` + RPC `select distinct regional from ... order by 1` (atau pagination keyset), plus penanda `truncated` di respons.
+
+### [LOW-2] `sanitizeRedirect` masih bisa diloloskan backslash/encoding
+- `src/app/login/page.tsx:8-12` hanya menolak `//` dan `://`; `/\evil.com` (backslash dinormalisasi browser menjadi `/` untuk URL scheme khusus) berpotensi lolos.
+- Perbaikan:
+```ts
+function sanitizeRedirect(raw: string): string {
+  try {
+    const base = new URL(window.location.origin);
+    const url = new URL(raw, base);
+    if (url.origin !== base.origin) return "/";
+    return `${url.pathname}${url.search}${url.hash}`;
+  } catch {
+    return "/";
+  }
+}
+```
+
+### [LOW-3] Token sesi stateless 24 jam, tanpa revokasi server-side
+- `src/lib/session.ts:66-104` — JWT HS256, `TOKEN_EXPIRY = "24h"`, logout hanya menghapus cookie. Token yang bocor tetap valid sampai kedaluwarsa; tidak ada daftar revoke/rotasi `JWT_SECRET`.
+- Perbaikan: TTL sesi turun (mis. 8 jam) + refresh saat aktivitas, atau `session_version` di tabel `users` yang diperiksa saat verifikasi.
+
+### [LOW-4] Pesan error API membocorkan detail internal
+- Contoh: `code: "MIGRATION_MISSING"` / `DB_ERROR` dan pesan khas PostgREST (`src/app/api/data-utama/route.ts`, `src/app/api/fee-rekap/route.ts:245-252`) sampai ke browser. Tidak fatal (tanpa kredensial), tapiibeberapa combinado bisa memetakan skema DB.
+- Perbaikan: kode error internal tetap di server (log), pesan ke client generik + Correlation ID.
+
+### [LOW-5] Cakupan uji belum memuat skenario regresi kritis
+- Tidak ada test untuk: negasi auto-close, batas tanggal timezone, race condition fetch, dan formula injection CSV.
+- Perbaikan: tambah test unit di `resiService.test.ts` & `feeRekapService.test.ts` (tabel: `"belum diterima"` → `false`, `"paket sudah diterima"` → `true`; `csvEscape("=1+1")` →leading `'`).
+
+---
+
+## D. Yang Sudah Benar (Terverifikasi) — Pertahankan
+
+- **RLS & GRANT melingkup**: `users` (`20260923000001_users_rls_lockdown.sql:11-15`), `data_lengkap_utama`/`resi`/`bailout` (`20261006000000_pii_rls_lockdown.sql:20-32`), `fee_loket`/`fee_upload_logs` (`20260924000000_fee_loket.sql:54-58`), `loket_profiles`/`loket_transaction_details` (`20261002000000_loket_profiles_details.sql:89-93`) — semuanya `enable row level security` + `revoke all from anon, authenticated` + `grant to service_role`; fungsi RPC `fee_rekap_summary`/`loket_profiles_summary` juga di-revoke dari publik (`:64-66`, `:93-96`).
+- **Tidak ada kebocoran kredensial ke client**: hanya `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` di `src/lib/supabase/client.ts`; `SUPABASE_SERVICE_ROLE_KEY` hanya di `src/lib/supabase/server.ts` (server-only). Tidak ada `dangerouslySetInnerHTML`/`innerHTML`/`eval`/`new Function` di repo.
+- **Tidak ada `any`**: TypeScript `strict: true`; grep `any` pada anotasi tipe = 0 hasil.
+- **Otorisasi berlapis**: `src/proxy.ts` (guard halaman + prefix ADMIN `/user-management`, `/admin`) dan tiap API route menegakkan sendiri (`getSession()` → 401, `isAdminSession()` → 403). Operasi destruktif/import: ADMIN-only (`api/resi/route.ts:171-180`, `api/fee-rekap/import/route.ts:54-64`, `api/fee-rekap/route.ts:537-546`, `api/fee-rekap/drop-all/route.ts:43-52`, `api/users/route.ts`).
+- **Password**: bcrypt (10 rounds) + auto-rehash hash legacy SHA-256 saat login (`src/lib/password.ts`, `api/auth/login/route.ts:92-101`); `JWT_SECRET` wajib & dicek panjangnya (`src/lib/session.ts:42-53`); cookie `httpOnly` + `secure` (produksi) + `sameSite=lax` (`session.ts:88-97`).
+- **Validasi input ketat**: tipe/length/enum per field (`api/resi/route.ts:100-160`, `api/users/route.ts`), batas baris/kolom import (`IMPORT_MAX_ROWS`, `IMPORT_MAX_COLS`), batas ukuran file + verifikasi magic bytes Excel (`src/lib/fileValidation.ts`, `src/lib/excel.ts`).
+- **Anti-injection PostgREST**: `sanitizeSearch`/`sanitizeKeyword` membuang `[%_,()]` (`dataUtamaService.ts:426`, `resiService.ts:232`), `escapeFeeLike`/`canonicalFeeSearch` untuk fee (`feeRekapService.ts:169,193`).
+- **Impor fee punya invariant akuntansi**: chunking idempoten + retry backoff (`feeRekapService.ts:2171+`), tripwire `receivedSum > 0 && storedSum === 0`, cek akuntabilitas per chunk (`upserted + failed === received`), dan rekonsiliasi PPID pasca-impor (`verifyFeeImport`) — pola Ini个大Bagus dan layak dipertahankan.
+- **Error handling UI**: `error.tsx`, `global-error.tsx`, `not-found.tsx`, `loading.tsx` tersedia; setiap fetch punya state `error` + tombol coba lagi.
+
+## E. Temuan dari Laporan Lama (5 Okt 2026) yang Sudah Diperbaiki
+
+| Temuan lama | Status 21 Okt 2026 |
+|---|---|
+| 3 tabel tanpa RLS (PII bisa dibaca anon) | **Fixed** — RLS + REVOKE + GRANT service_role (lihat bagian D) |
+| Halaman browser query DB langsung dengan anon key | **Fixed** — seluruh query pindah ke API ber-sesi (`data-utama`, `bagging`, `lookup-agen`) |
+| `DELETE /api/resi` tanpa cek ADMIN & tanpa batas | **Fixed** — ADMIN-only + `RESI_DELETE_MAX_IDS` (`resiService.ts:644`) |
+| Tidak ada `error.tsx` / `not-found.tsx` | **Fixed** — file tersedia |
+| Regex auto-close over-match | **Sisa** — pola diperbaiki dari `/deliv|delivered|retur/i` ke kata utuh, tapi **negasi masih lolos** → lihat [HIGH-2] |
+| Inkonsistensi NET vs GROSS | **Sisa** — lihat [HIGH-3] |
+| Rate-limit login rapuh | **Sisa** — lihat [MEDIUM-5] |
+
+## F. Roadmap yang Disarankan
+
+| Sprint | Item | Temuan |
+|---|---|---|
+| 1 (blocking rilis) | ✅ Server-side pagination/filter rekap fee (selesai 21 Okt 2026) — deploy migrasi `20261009000000_fee_rekap_summary_per_period.sql` | HIGH-1 |
+| 1 | ✅ Veto negasi auto-close + test regresi (selesai 21 Okt 2026) | HIGH-2 |
+| 1 | ✅ `computeTotalFee` tunggal (selesai 21 Okt 2026) — sisa: re-import baris legacy agar `total_fee` GROSS | HIGH-3 |
+| 2 | Filter tanggal WIB + race guard fetch | MEDIUM-1, MEDIUM-2 |
+| 2 | Anti-formula CSV/Excel export | MEDIUM-3 |
+| 2 | Rate-limit login robust + eviction | MEDIUM-5 |
+| 2 | Security headers (`next.config.ts`) | MEDIUM-6 |
+| 3 | Batch endpoint HP agen (anti N+1) | MEDIUM-4 |
+| 3 | Unique index `resi(nomor_resi)` + upsert atomik | MEDIUM-8 |
+| 3 | Validasi kalender `parseCopasDate` | MEDIUM-9 |
+| 3 | `lint` bersih + CI (lint/test/build) | MEDIUM-7 |
+| 4 | Pecah `fee-rekap` page & service (SoC) | MEDIUM-10 |
+| 4 | Opsi regional via RPC distinct | LOW-1 |
+| 4 | `sanitizeRedirect` same-origin, TTL sesi, redaksi error | LOW-2/3/4 |

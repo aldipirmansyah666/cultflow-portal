@@ -129,8 +129,36 @@ export function classifyResiDbError(
 export const AUTO_CLOSE_NOTE_REGEX =
   /(?:^|[\s.,;:])(delivered|diterima(\s+paket)?|paket\s+(sudah\s+)?diterima|retur(\s+disetujui)?)(?=[\s.,;:!]|$)/i;
 
+/**
+ * Kata negasi eksplisit. Kemunculannya di catatan membatalkan
+ * auto-close sepenuhnya, contoh: "belum diterima", "tidak diterima",
+ * "belum retur", "masih diproses".
+ *
+ * Sifatnya KONSERVATIF: resi yang negated dibiarkan terbuka (petugas
+ * menutup manual) alih-alih ditutup paksa — lebih baik resi terbuka
+ * daripada resi tertutup diam-diam lalu ikut ter-purge otomatis
+ * (RESI_PURGE_AFTER_DAYS). Batas kata (\b) dipakai agar "tak" tidak
+ * ikut cocok di dalam kata lain (mis. "kontak", "ketidak").
+ */
+export const AUTO_CLOSE_NEGATION_REGEX =
+  /\b(belum|belom|bukan|tidak|tak|jangan|sedang|proses|menunggu|pending)\b/i;
+
+/**
+ * True bila catatan MELETAKKAN resi sebagai sudah diterima/ditutup.
+ *
+ * Aturan:
+ * 1. Catatan kosong -> false.
+ * 2. Catatan mengandung kata negasi eksplisit -> false (tak pernah
+ *    auto-close), walau kata kunci serah-terima ikut ada.
+ * 3. Selebihnya -> true bila ada kata kunci utuh (delivered/diterima/
+ *    retur) yang sah dan tegas.
+ */
 export function isAutoCloseNote(catatan: string | null | undefined): boolean {
   if (catatan === null || catatan === undefined || catatan.trim() === "") {
+    return false;
+  }
+  // Negasi eksplisit membatalkan auto-close (mis. "belum diterima").
+  if (AUTO_CLOSE_NEGATION_REGEX.test(catatan)) {
     return false;
   }
   return AUTO_CLOSE_NOTE_REGEX.test(catatan);

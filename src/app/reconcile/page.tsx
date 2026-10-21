@@ -11,17 +11,30 @@ import {
 } from "lucide-react";
 import {
   buildReconcileBreakdown,
+  paginateReconcileRows,
   validateReconcileRows,
   type ReconcileValidationResult,
 } from "@/core/parsers/reconcileValidator";
 import {
+  columnLetter,
   extractReconcileInputRows,
   findReconcileHeader,
   normalizeReconcileRowsFromObjects,
   type DetectedHeader,
   type ReconcileInputRow,
 } from "@/core/parsers/reconcileHeader";
+import {
+  MAX_RECONCILE_FILE_SIZE_BYTES,
+  validateFileSize,
+} from "@/lib/fileValidation";
 import { cn } from "@/lib/utils";
+
+/**
+ * [H2] Baris hasil validasi per halaman. Hanya baris di halaman ini yang
+ * dirender ke DOM — 100 baris ≈ 500 node (aman), sedangkan 20.000 baris
+ * ≈ 100.000 node (browser freeze).
+ */
+const RESULT_PAGE_SIZE = 100;
 
 export default function ReconcilePage() {
   const [fileName, setFileName] = useState<string>("");
@@ -29,24 +42,92 @@ export default function ReconcilePage() {
   const [parseError, setParseError] = useState<string | null>(null);
   const [parsing, setParsing] = useState(false);
   const [invalidOnly, setInvalidOnly] = useState(false);
+  /**
+   * Kolom resi yang terdeteksi (0-based) → dipakai untuk menampilkan
+   * alamat sel (mis. "D412") supaya user bisa langsung menuju sel
+   * bermasalah di Excel. "" bila header tak terdeteksi (jalur fallback).
+   */
+  const [resiCol, setResiCol] = useState<number>(-1);
+  // [H2] Paginasi hasil validasi: hanya 100 baris per halaman yang dirender.
+  const [page, setPage] = useState(1);
+  // Filter produk (opsional) untuk mempersempit tabel.
+  const [produkFilter, setProdukFilter] = useState<string>("ALL");
 
-  const visibleRows = useMemo(() => {
+  /**
+   * Baris hasil validasi yang cocok filter (status + produk).
+   *
+   * [H2] Baris ini TIDAK dirender seluruhnya — hanya satu halaman
+   * (`RESULT_PAGE_SIZE` baris) yang masuk DOM. Untuk berkas 20.000+ baris,
+   * render utuh menghasilkan ±100.000 node DOM → browser freeze.
+   *
+   * Catatan: filter di atas BUKAN sumber angka ringkasan — kartu
+   * ringkasan tetap memakai `result.summary` (seluruh data hasil
+   * validasi), sehingga total valid/error tak pernah terpengaruh filter
+   * atau paginasi.
+   */
+  const filteredRows = useMemo(() => {
     if (!result) return [];
-    return invalidOnly
-      ? result.rows.filter((r) => !r.isValid)
-      : result.rows;
-  }, [result, invalidOnly]);
+    return result.rows.filter(
+      (r) =>
+        (!invalidOnly || !r.isValid) &&
+        (produkFilter === "ALL" || r.produk === produkFilter)
+    );
+  }, [result, invalidOnly, produkFilter]);
+
+  // [H2] Paginasi murni: hanya baris satu halaman yang dirender; `total`
+  // tetap jumlah seluruh baris yang cocok filter (bukan jumlah di halaman).
+  const pageData = useMemo(
+    () => paginateReconcileRows(filteredRows, page, RESULT_PAGE_SIZE),
+    [filteredRows, page]
+  );
+  const pageRows = pageData.rows;
+  const totalPages = pageData.totalPages;
+  const safePage = pageData.page;
+  const rangeStart = pageData.rangeStart;
+  const rangeEnd = pageData.rangeEnd;
+
+  /** Daftar produk yang muncul di berkas (untuk dropdown filter). */
+  const productOptions = useMemo(() => {
+    if (!result) return [];
+    const set = new Set<string>();
+    for (const row of result.rows) {
+      if (row.produk !== "") set.add(row.produk);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, "id"));
+  }, [result]);
 
   const breakdown = useMemo(
     () => (result ? buildReconcileBreakdown(result.rows) : null),
     [result]
   );
 
+  /** Nomor halaman yang ditampilkan (jendela 5 tombol di tengah). */
+  function pageNumbers(): number[] {
+    if (totalPages <= 7) {
+      return Array.from({ length: totalPages }, (_, i) => i + 1);
+    }
+    const window: number[] = [1, safePage - 1, safePage, safePage + 1, totalPages];
+    return [...new Set(window.filter((n) => n >= 1 && n <= totalPages))].sort(
+      (a, b) => a - b
+    );
+  }
+
   async function handleFile(file: File) {
     setParsing(true);
     setParseError(null);
     setResult(null);
+    // Paginasi & filter direset bersama berkas baru.
+    setPage(1);
+    setProdukFilter("ALL");
     try {
+      // [H3] Validasi ukuran SEBELUM berkas dibaca ke memori. Tanpa ini,
+      // `file.arrayBuffer()` pada file ratusan MB menghabiskan heap browser
+      // (exceljs membuat matriks kedua) → tab crash tanpa pesan.
+      const sizeErr = validateFileSize(file, MAX_RECONCILE_FILE_SIZE_BYTES);
+      if (sizeErr) {
+        setParseError(sizeErr);
+        return;
+      }
       // exceljs dimuat on-demand agar tidak membebani initial load.
       const {
         loadWorkbookFromBuffer,
@@ -123,6 +204,8 @@ export default function ReconcilePage() {
           ? `${file.name} — sheet "${sheetName}"`
           : file.name
       );
+      // Kolom resi untuk alamat sel (mis. "D412") di laporan.
+      setResiCol(header ? header.resiCol : -1);
       setResult(validateReconcileRows(inputRows));
     } catch (err) {
       setParseError(
@@ -138,6 +221,9 @@ export default function ReconcilePage() {
     setResult(null);
     setParseError(null);
     setInvalidOnly(false);
+    setResiCol(-1);
+    setPage(1);
+    setProdukFilter("ALL");
   }
 
   return (
@@ -376,25 +462,56 @@ export default function ReconcilePage() {
           )}
 
           <section className="cf-card overflow-hidden">
-            <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-bold text-slate-900">
-                Hasil Validasi Baris
-              </h2>
-              <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600">
-                <input
-                  type="checkbox"
-                  checked={invalidOnly}
-                  onChange={(e) => setInvalidOnly(e.target.checked)}
-                  className="size-4 accent-cyan-600"
-                />
-                Hanya tampilkan invalid
-              </label>
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900">
+                  Hasil Validasi Baris
+                </h2>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Nomor baris = baris asli di berkas Excel (alamat sel kolom
+                  resi) — bukan nomor urut hasil ekstraksi.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                {productOptions.length > 1 && (
+                  <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                    Produk
+                    <select
+                      value={produkFilter}
+                      onChange={(e) => {
+                        setProdukFilter(e.target.value);
+                        setPage(1);
+                      }}
+                      className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 focus:outline-none"
+                    >
+                      <option value="ALL">Semua produk</option>
+                      {productOptions.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={invalidOnly}
+                    onChange={(e) => {
+                      setInvalidOnly(e.target.checked);
+                      setPage(1);
+                    }}
+                    className="size-4 accent-cyan-600"
+                  />
+                  Hanya tampilkan invalid
+                </label>
+              </div>
             </div>
             <div className="max-h-[480px] overflow-auto">
               <table className="w-full min-w-[640px] text-left text-sm">
                 <thead className="sticky top-0 bg-slate-900 text-xs tracking-wider text-slate-200 uppercase">
                   <tr>
-                    <th scope="col" className="px-4 py-2.5 font-semibold">#</th>
+                    <th scope="col" className="px-4 py-2.5 font-semibold">Baris Excel</th>
                     <th scope="col" className="px-4 py-2.5 font-semibold">Produk</th>
                     <th scope="col" className="px-4 py-2.5 font-semibold">Nomor Resi</th>
                     <th scope="col" className="px-4 py-2.5 font-semibold">Status</th>
@@ -402,21 +519,29 @@ export default function ReconcilePage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleRows.length === 0 ? (
+                  {pageRows.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-500">
                         {invalidOnly
                           ? "Tidak ada baris invalid. Semua valid."
-                          : "Tidak ada baris."}
+                          : produkFilter !== "ALL"
+                            ? `Tidak ada baris untuk produk ${produkFilter}.`
+                            : "Tidak ada baris."}
                       </td>
                     </tr>
                   ) : (
-                    visibleRows.map((row) => (
+                    pageRows.map((row) => (
                       <tr
                         key={row.index}
                         className="border-b border-slate-100 last:border-0"
                       >
-                        <td className="px-4 py-2 text-slate-400">{row.index + 1}</td>
+                        {/* Nomor baris ASLI di berkas Excel (tidak bergeser
+                            dengan header awal / baris kosong yang dibuang). */}
+                        <td className="px-4 py-2 font-mono text-xs text-slate-500">
+                          {resiCol >= 0
+                            ? `${columnLetter(resiCol)}${row.sourceRow}`
+                            : row.sourceRow}
+                        </td>
                         <td className="px-4 py-2 font-semibold text-slate-800">
                           {row.produk || "—"}
                         </td>
@@ -444,6 +569,59 @@ export default function ReconcilePage() {
                   )}
                 </tbody>
               </table>
+            </div>
+            {/* [H2] Navigasi halaman: hanya satu halaman (100 baris) yang
+                dirender; ringkasan total tetap dari SELURUH data. */}
+            <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/60 px-4 py-3">
+              <p className="text-xs font-medium text-slate-500">
+                {filteredRows.length === 0
+                  ? "Tidak ada baris untuk ditampilkan"
+                  : `Menampilkan ${rangeStart}–${rangeEnd} dari ${filteredRows.length.toLocaleString("id-ID")} baris`}
+                {result && filteredRows.length !== result.rows.length && (
+                  <span className="ml-1 text-slate-400">
+                    (dari total {result.rows.length.toLocaleString("id-ID")} baris
+                    hasil validasi)
+                  </span>
+                )}
+              </p>
+              {totalPages > 1 && (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setPage(Math.max(1, safePage - 1))}
+                    disabled={safePage <= 1}
+                    aria-label="Halaman sebelumnya"
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                  >
+                    ‹
+                  </button>
+                  {pageNumbers().map((n) => (
+                    <button
+                      key={n}
+                      type="button"
+                      onClick={() => setPage(n)}
+                      aria-current={n === safePage ? "page" : undefined}
+                      className={cn(
+                        "min-w-8 rounded-lg px-2 py-1.5 text-xs font-semibold",
+                        n === safePage
+                          ? "bg-slate-900 text-white"
+                          : "border border-slate-200 bg-white text-slate-600 hover:bg-slate-100"
+                      )}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setPage(Math.min(totalPages, safePage + 1))}
+                    disabled={safePage >= totalPages}
+                    aria-label="Halaman berikutnya"
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
             </div>
           </section>
         </>

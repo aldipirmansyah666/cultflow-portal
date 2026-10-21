@@ -55,10 +55,10 @@ import {
   detectFeeHeader,
   displayNamaLoket,
   dropAllFeeData,
+  fetchAllFeeList,
   fetchFeeList,
   fetchLoketLookup,
   fetchUploadLogs,
-  filterFeeRows,
   fillMergedCells,
   formatNumber,
   formatPeriode,
@@ -67,7 +67,6 @@ import {
   isCariSheetMatrix,
   isNontrivialFullParse,
   normalizeHeaderCell,
-  paginateRows,
   parseCariSheet,
   parseFeeRowsFromAOA,
   parseLoketBsbFull,
@@ -95,7 +94,12 @@ import { cn, copyTextToClipboard, downloadBlob } from "@/lib/utils";
 
 type TabKey = "monitoring" | "upload";
 
-const PAGE_SIZE = 6;
+/**
+ * Ukuran halaman tabel rekap — dikirim ke server (bukan paginasi lokal).
+ * 50 baris/halaman: pagination di DB = 1 request per halaman, sedangkan
+ * 6 baris/halaman membuat 10.000 baris butuh 1.667 klik.
+ */
+const PAGE_SIZE = 50;
 const PREVIEW_LIMIT = 8;
 const SEARCH_DEBOUNCE_MS = 350;
 
@@ -432,18 +436,27 @@ export default function FeeRekapPage() {
   const [tab, setTab] = useState<TabKey>("monitoring");
   const [role, setRole] = useState<string | null>(null);
 
-  // --- Data riil dari API (bukan mock) ---
-  const [dataset, setDataset] = useState<FeeRekapRow[]>([]);
+  // --- Data dari API (server-driven: filter + paginasi di DB) ---
+  // `rows` = baris SATU HALAMAN dari server (bukan 1.000 baris lokal).
+  // Filter (PPID/nama) + periode + paginasi dieksekusi di PostgREST,
+  // sehingga data di atas 1.000 baris tetap terjangkau.
+  const [rows, setRows] = useState<FeeRekapRow[]>([]);
   const [periods, setPeriods] = useState<string[]>([]);
   const [summary, setSummary] = useState({ totalLoket: 0, totalTerbayarAktif: 0, latestPeriode: "" });
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [logs, setLogs] = useState<UploadLog[]>([]);
   const [logsError, setLogsError] = useState<string | null>(null);
-  // Batas halaman server: true bila DB menyimpan baris di luar 1000 yang
-  // dimuat (peringatan anti-pemotongan-diam, lihat `truncated` API).
-  const [listTruncated, setListTruncated] = useState(false);
+  // Total baris dari DB (count exact, sudah memperhitungkan filter
+  // periode + pencarian) — denominator pagination & angka header.
   const [listTotal, setListTotal] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  // Hasil pencarian profil agen di server (semua periode agen tersebut).
+  const [serverSearch, setServerSearch] = useState<{
+    q: string;
+    rows: FeeRekapRow[];
+  } | null>(null);
+  const [serverSearching, setServerSearching] = useState(false);
 
   // --- Pencarian ala Cari (satu box menggerakkan slip + tabel) ---
   const [search, setSearch] = useState("");
@@ -491,6 +504,8 @@ export default function FeeRekapPage() {
   const [deleteTarget, setDeleteTarget] = useState<FeeRekapRow | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Ekspor berjalan: null = idle, "csv"/"xlsx" = sedang mengunduh.
+  const [exporting, setExporting] = useState<"csv" | "xlsx" | null>(null);
   // Reset total database (Drop All Data) — khusus ADMIN + dialog konfirmasi.
   const [dropOpen, setDropOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
@@ -547,39 +562,71 @@ export default function FeeRekapPage() {
     };
   }, []);
 
-  const loadAll = useCallback(async () => {
+  /**
+   * Muat satu halaman fee dari server. Filter (q + periode) dan
+   * paginasi dieksekusi di database — tak ada lagi dataset lokal 1.000
+   * baris yang memotong data (audit HIGH-1).
+   *
+   * `requestSeq` mencegah respons basi menimpa data baru: saat filter
+   * berubah sebelum request sebelumnya selesai, request lama diabaikan.
+   */
+  const requestSeq = useRef(0);
+
+  const loadPage = useCallback(async () => {
+    const seq = (requestSeq.current += 1);
     setListLoading(true);
     setListError(null);
     try {
-      const [list, logList] = await Promise.all([
-        fetchFeeList({ pageSize: 1000 }),
-        fetchUploadLogs().catch(() => {
-          setLogsError("Riwayat tak termuat.");
-          return [] as UploadLog[];
-        }),
-      ]);
-      setDataset(list.data);
+      const q = committedQuery.trim();
+      const list = await fetchFeeList({
+        ...(q === "" ? {} : { q }),
+        ...(periode === "SEMUA" ? {} : { periode }),
+        page,
+        pageSize: PAGE_SIZE,
+      });
+      if (seq !== requestSeq.current) return; // ada request lebih baru
+      setRows(list.data);
+      setListTotal(list.total);
+      setTotalPages(Math.max(1, list.totalPages));
       setPeriods(list.periods);
       setSummary(list.summary);
-      setListTruncated(list.truncated);
-      setListTotal(list.total);
-      setLogs(logList);
-      setLogsError(null);
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setListError(err instanceof Error ? err.message : "Gagal memuat fee.");
-      setDataset([]);
-      setListTruncated(false);
+      setRows([]);
       setListTotal(0);
     } finally {
-      setListLoading(false);
+      if (seq === requestSeq.current) setListLoading(false);
+    }
+  }, [committedQuery, periode, page]);
+
+  /** Muat riwayat upload (terpisah dari daftar agar tak ter-reset). */
+  const loadLogs = useCallback(async () => {
+    try {
+      const logList = await fetchUploadLogs();
+      setLogs(logList);
+      setLogsError(null);
+    } catch {
+      setLogsError("Riwayat tak termuat.");
+      setLogs([]);
     }
   }, []);
 
   useEffect(() => {
-    // Pengambilan awal saat mount — kasus kanonis efek sinkronisasi data.
+    // Pengambilan data saat filter/paginasi berubah — kasus kanonis
+    // efek sinkronisasi data dari server.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadAll();
-  }, [loadAll]);
+    void loadPage();
+    return () => {
+      // Batalkan respons request lama (tak menimpa request baru).
+      requestSeq.current += 1;
+    };
+  }, [loadPage]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void loadLogs();
+  }, [loadLogs]);
 
   useEffect(() => {
     if (!toast) return;
@@ -587,9 +634,35 @@ export default function FeeRekapPage() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Debounce pencarian ala VLOOKUP instan sheet Cari. Profil di-derive
-  // sinkron dari dataset fee lokal (tanpa fetch master), jadi efek ini
-  // hanya memapan query + reset halaman (setState di callback = aman).
+  /** Reset state lookup Master (dipanggil sinkron dari handler, bukan efek). */
+  function clearLookup() {
+    setLookupProfile(null);
+    setLookupDetails([]);
+    setLookupLegacy(false);
+    setLookupError(null);
+    setLookupLoading(false);
+    setServerSearching(false);
+  }
+
+  /**
+   * Mulai lookup Master: bersihkan hasil lama + nyalakan loading.
+   * Dipanggil dari handler/commit (event/timeout callback = aman), bukan
+   * dari badan efek — agar lolos `react-hooks/set-state-in-effect`.
+   */
+  function startLookup() {
+    setLookupProfile(null);
+    setLookupDetails([]);
+    setLookupLegacy(false);
+    setLookupError(null);
+    setLookupLoading(true);
+    // Pencarian profil agen (server) sedang berjalan — status di-set di
+    // handler/commit, bukan di badan efek.
+    setServerSearching(true);
+  }
+
+  // Debounce pencarian ala VLOOKUP instan sheet Cari. Efek ini hanya
+  // memapan query + reset halaman (setState di callback = aman); daftar
+  // tabel di-refresh oleh efek `loadPage` (filter di server).
   // Lookup Master ikut dimulai di sini (loading di callback, bukan efek).
   useEffect(() => {
     if (search.trim() === "") return;
@@ -608,28 +681,6 @@ export default function FeeRekapPage() {
       setPage(1);
       clearLookup();
     }
-  }
-
-  /** Reset state lookup Master (dipanggil sinkron dari handler, bukan efek). */
-  function clearLookup() {
-    setLookupProfile(null);
-    setLookupDetails([]);
-    setLookupLegacy(false);
-    setLookupError(null);
-    setLookupLoading(false);
-  }
-
-  /**
-   * Mulai lookup Master: bersihkan hasil lama + nyalakan loading.
-   * Dipanggil dari handler/commit (event/timeout callback = aman), bukan
-   * dari badan efek — agar lolos `react-hooks/set-state-in-effect`.
-   */
-  function startLookup() {
-    setLookupProfile(null);
-    setLookupDetails([]);
-    setLookupLegacy(false);
-    setLookupError(null);
-    setLookupLoading(true);
   }
 
   /** Reset state lookup modal Detail (dipanggil dari handler, bukan efek). */
@@ -690,46 +741,30 @@ export default function FeeRekapPage() {
   }, [committedQuery, periode]);
 
   // --- Derived ---
-  const filtered = useMemo(
-    () => filterFeeRows(dataset, committedQuery, periode),
-    [dataset, committedQuery, periode]
-  );
-  const { pageRows, totalPages, safePage } = useMemo(
-    () => paginateRows(filtered, page, PAGE_SIZE),
-    [filtered, page]
-  );
+  // Filter + paginasi TIDAK lagi dihitung di browser: `rows` sudah
+  // berisi satu halaman hasil filter server (q + periode + page).
+  const safePage = Math.min(Math.max(1, page), Math.max(1, totalPages));
+  const rangeStart = listTotal === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+  const rangeEnd = Math.min(safePage * PAGE_SIZE, listTotal);
+  // Masih ada baris di halaman berikutnya? (dari total DB, bukan dataset)
+  const hasMorePages = safePage < totalPages;
 
   /**
-   * Fee milik agen pada slip — strict match langsung dari data fee
-   * (String(ppid).trim().toUpperCase() via getSelectedLoketData()).
-   * Tidak ada ketergantungan master: query dicocokkan ke dataset fee,
-   * atau ke hasil pencarian server bila dataset lokal (1000 baris) miss.
+   * Slip agen: data diambil dari SERVER (semua periode agen tersebut),
+   * bukan dari dataset lokal — tabel kini hanya memuat satu halaman,
+   * sehingga profil lengkap harus di-query terpisah.
    */
-  const localProfile = useMemo(() => {
-    if (committedQuery.trim() === "") return null;
-    return buildFeeAgentProfile(
-      getSelectedLoketData(dataset, committedQuery, "SEMUA"),
-      periode
-    );
-  }, [dataset, committedQuery, periode]);
-
-  // Fallback server: dataset lokal dibatasi 1000 baris pertama sehingga
-  // PPID yang tersimpan BISA tidak ada di memori ("tidak ditemukan"
-  // palsu). Bila lokal miss, tanyakan server (filter q di DB) sekali saja
-  // per query ter-commit.
-  const [serverSearch, setServerSearch] = useState<{
-    q: string;
-    rows: FeeRekapRow[];
-  } | null>(null);
-  const [serverSearching, setServerSearching] = useState(false);
-
   useEffect(() => {
     const q = committedQuery.trim();
-    if (q === "" || listLoading || localProfile) return;
+    // Tanpa query tak ada profil yang dicari — JANGAN setState sinkron di
+    // dalam efek (state lama otomatis tak terpakai: `serverRowsForQuery`
+    // hanya berlaku bila q-nya cocok).
+    if (q === "") return;
     let cancelled = false;
-    setServerSearching(true);
     (async () => {
       try {
+        // pageSize 100: cukup untuk seluruh periode satu agen (satu
+        // baris per periode) + exact-first match.
         const res = await fetchFeeList({ q, pageSize: 100 });
         if (!cancelled) setServerSearch({ q, rows: res.data });
       } catch {
@@ -741,28 +776,28 @@ export default function FeeRekapPage() {
     return () => {
       cancelled = true;
     };
-  }, [committedQuery, listLoading, localProfile]);
+  }, [committedQuery]);
 
   const serverRowsForQuery =
     serverSearch && serverSearch.q === committedQuery.trim()
       ? serverSearch.rows
       : null;
 
-  const agentProfile: FeeAgentProfile | null =
-    localProfile ??
-    (serverRowsForQuery
-      ? buildFeeAgentProfile(
-          getSelectedLoketData(serverRowsForQuery, committedQuery, "SEMUA"),
-          periode
-        )
-      : null);
-  const profileFromServer = localProfile === null && agentProfile !== null;
+  const agentProfile: FeeAgentProfile | null = useMemo(() => {
+    if (committedQuery.trim() === "") return null;
+    const pool = serverRowsForQuery ?? [];
+    if (pool.length === 0) return null;
+    return buildFeeAgentProfile(
+      getSelectedLoketData(pool, committedQuery, "SEMUA"),
+      periode
+    );
+  }, [serverRowsForQuery, committedQuery, periode]);
+  const profileFromServer = agentProfile !== null;
 
   const agentFees = useMemo(() => {
     if (committedQuery.trim() === "") return [];
-    const pool = localProfile ? dataset : (serverRowsForQuery ?? []);
-    return getSelectedLoketData(pool, committedQuery, periode);
-  }, [dataset, committedQuery, periode, localProfile, serverRowsForQuery]);
+    return getSelectedLoketData(serverRowsForQuery ?? [], committedQuery, periode);
+  }, [committedQuery, periode, serverRowsForQuery]);
 
   // Identitas file untuk nama PNG slip kartu hasil pencarian: profil
   // Master bila ada, jika tidak profil virtual (pakai periode filter
@@ -778,17 +813,17 @@ export default function FeeRekapPage() {
       : null;
 
   /**
-   * Modal selalu me-resolve ulang dari dataset segar (anti snapshot basi
+   * Modal selalu me-resolve ulang dari baris server (anti snapshot basi
    * 0/kosong): cocok PPID + periode via getSelectedLoketData, fallback ke
    * snapshot bila baris sudah tidak ada (mis. habis dihapus).
    */
   const liveSelected = useMemo(() => {
     if (!selected) return null;
     return (
-      getSelectedLoketData(dataset, selected.ppid, selected.periode)[0] ??
+      getSelectedLoketData(rows, selected.ppid, selected.periode)[0] ??
       selected
     );
-  }, [dataset, selected]);
+  }, [rows, selected]);
 
   // Kunci fetch lookup modal (PPID + periode baris terpilih).
   const modalKey = selected ? `${selected.ppid}||${selected.periode}` : "";
@@ -967,31 +1002,56 @@ export default function FeeRekapPage() {
     await copySlipNodeImage(modalSlipRef.current);
   }
 
-  function downloadCsv() {
+  /**
+   * Ambil SEMUA baris yang cocok filter aktif (q + periode) dari server
+   * untuk keperluan ekspor — tabel utama kini hanya memuat satu
+   * halaman, jadi ekspor tak boleh ikut terpotong diam-diam.
+   */
+  async function loadAllMatchingRows(): Promise<FeeRekapRow[]> {
+    const q = committedQuery.trim();
+    const res = await fetchAllFeeList({
+      ...(q === "" ? {} : { q }),
+      ...(periode === "SEMUA" ? {} : { periode }),
+    });
+    if (res.truncated) {
+      setToast(
+        `Data melebihi 50.000 baris — ekspor memakai 50.000 baris pertama.`
+      );
+    }
+    return res.data;
+  }
+
+  async function downloadCsv() {
+    setExporting("csv");
     try {
-      const blob = new Blob([buildFeeCsv(filtered)], {
+      const exportRows = await loadAllMatchingRows();
+      const blob = new Blob([buildFeeCsv(exportRows)], {
         type: "text/csv;charset=utf-8",
       });
       downloadBlob(
         blob,
         `rekap-fee-${periode === "SEMUA" ? "semua" : periode}.csv`
       );
-      setToast(`${filtered.length} baris diekspor ke CSV.`);
+      setToast(`${exportRows.length} baris diekspor ke CSV.`);
     } catch (err) {
       setToast(
         err instanceof Error
           ? `Gagal mengekspor CSV: ${err.message}`
           : "Gagal mengekspor CSV di browser ini."
       );
+    } finally {
+      setExporting(null);
     }
   }
 
   async function downloadExcel() {
+    setExporting("xlsx");
     try {
+      const exportRows = await loadAllMatchingRows();
       const { downloadAoaAsXlsx } = await import("@/lib/excel");
       const aoa: (string | number)[][] = [
         ["No", "PPID", "Nama Loket", "Periode", "Total Fee (Rp)", "Status"],
-        ...filtered.map((r, i) => [
+        ...exportRows.map((r, i) => [
           i + 1,
           r.ppid,
           r.namaLoket,
@@ -1006,13 +1066,15 @@ export default function FeeRekapPage() {
         aoa,
         [5, 18, 28, 18, 18, 12]
       );
-      setToast(`${filtered.length} baris diekspor ke Excel.`);
+      setToast(`${exportRows.length} baris diekspor ke Excel.`);
     } catch (err) {
       setToast(
         err instanceof Error
           ? `Gagal mengekspor Excel: ${err.message}`
           : "Gagal mengekspor Excel di browser ini."
       );
+    } finally {
+      setExporting(null);
     }
   }
 
@@ -1209,9 +1271,8 @@ export default function FeeRekapPage() {
             const zeroFeeRows = full.rows.filter((x) => x.totalFee === 0).length;
             auditRows += full.rows.length;
             auditZero += zeroFeeRows;
-            auditClamped += full.rows.filter(
-              (x) => x.auditFlag === "OVER_DEDUCTED_CLAMPED"
-            ).length;
+            auditClamped += full.rows.filter((x) => x.auditFlag !== undefined)
+              .length;
             const masterSamples = full.rows.slice(
               0,
               Math.max(0, 5 - auditSamples.length)
@@ -1555,12 +1616,14 @@ export default function FeeRekapPage() {
       setPreview([]);
       setFileMeta(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      await loadAll();
-      // Verifikasi silang DB: baca ulang periode yang baru disimpan agar
-      // admin langsung melihat N baris / total / baris nol (cross-check
-      // terhadap file master, mis. loket 53JCUM03019BGRLM).
+      await loadPage();
+      await loadLogs();
+      // Verifikasi silang DB: baca ulang SELURUH baris periode yang baru
+      // disimpan (bukan hanya 1.000 pertama) agar admin melihat N baris /
+      // total / baris nol yang akurat — cross-check terhadap file master,
+      // mis. loket 53JCUM03019BGRLM.
       try {
-        const verify = await fetchFeeList({ periode: result.periode, pageSize: 1000 });
+        const verify = await fetchAllFeeList({ periode: result.periode });
         // totalFee sudah integer bulat (parseAmount + Math.round di
         // service) sehingga reduce di sini presisi.
         const sum = verify.data.reduce((s, r) => s + r.totalFee, 0);
@@ -1622,7 +1685,10 @@ export default function FeeRekapPage() {
         prev && prev.id === deleteTarget.id ? null : prev
       );
       setToast(`Fee ${label} dihapus (${result.deleted} baris).`);
-      await loadAll();
+      await loadPage();
+      // Bila baris terakhir di halaman ini terhapus, mundur satu halaman
+      // agar user tak mendarat di halaman kosong.
+      if (rows.length <= 1 && safePage > 1) setPage(safePage - 1);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : "Gagal menghapus fee.");
     } finally {
@@ -1648,7 +1714,8 @@ export default function FeeRekapPage() {
       setToast(
         `Seluruh data fee dihapus — ${result.profiles} profil, ${result.details} rincian, ${result.feeLoket} baris legacy, ${result.uploadLogs} log upload. Siap re-import bersih.`
       );
-      await loadAll();
+      await loadPage();
+      await loadLogs();
     } catch (err) {
       setDropError(err instanceof Error ? err.message : "Gagal menghapus data.");
     } finally {
@@ -1715,14 +1782,22 @@ export default function FeeRekapPage() {
             <StatCard
               title="Total Loket Terdaftar"
               value={listLoading ? "…" : String(summary.totalLoket)}
-              subtitle={`${dataset.length} baris fee di database`}
+              subtitle={
+                periode === "SEMUA"
+                  ? `${listTotal} baris fee di database`
+                  : `${listTotal} baris fee · periode ${formatPeriode(periode)}`
+              }
               icon={<Store className="size-5 text-slate-500" aria-hidden />}
               accent="slate"
             />
             <StatCard
               title="Total Fee Terbayar"
               value={listLoading ? "…" : formatRupiah(summary.totalTerbayarAktif)}
-              subtitle={`Periode aktif: ${summary.latestPeriode === "" ? "—" : formatPeriode(summary.latestPeriode)}`}
+              subtitle={
+                periode === "SEMUA"
+                  ? `Periode aktif: ${summary.latestPeriode === "" ? "—" : formatPeriode(summary.latestPeriode)}`
+                  : `Periode aktif: ${formatPeriode(periode)}`
+              }
               icon={<Banknote className="size-5 text-emerald-600" aria-hidden />}
               accent="emerald"
             />
@@ -1820,20 +1895,20 @@ export default function FeeRekapPage() {
                 <button
                   type="button"
                   onClick={() => void downloadExcel()}
-                  disabled={filtered.length === 0}
+                  disabled={listTotal === 0 || exporting !== null}
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-slate-900 px-3.5 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-40"
                 >
                   <Download className="size-3.5" aria-hidden />
-                  Excel
+                  {exporting === "xlsx" ? "Menyiapkan…" : "Excel"}
                 </button>
                 <button
                   type="button"
-                  onClick={downloadCsv}
-                  disabled={filtered.length === 0}
+                  onClick={() => void downloadCsv()}
+                  disabled={listTotal === 0 || exporting !== null}
                   className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"
                 >
                   <FileSpreadsheet className="size-3.5" aria-hidden />
-                  CSV
+                  {exporting === "csv" ? "Menyiapkan…" : "CSV"}
                 </button>
               </div>
             </div>
@@ -1843,7 +1918,7 @@ export default function FeeRekapPage() {
           {hasQuery && !listLoading && !listError && !agentProfile && serverSearching && (
             <div className="flex items-center justify-center gap-2 rounded-2xl border border-slate-200 bg-white py-8 text-center">
               <p className="text-xs font-semibold text-slate-500">
-                Tidak ada di 1000 baris awal — mencari di database…
+                Mencari profil agen di database…
               </p>
             </div>
           )}
@@ -1870,7 +1945,7 @@ export default function FeeRekapPage() {
                   </span>
                   {profileFromServer && (
                     <span className="ml-2 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
-                      Ditemukan di database (di luar 1000 baris awal)
+                      Ditemukan di database (pencarian server)
                     </span>
                   )}
                 </p>
@@ -2036,17 +2111,14 @@ export default function FeeRekapPage() {
             <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-3">
               <h2 className="text-sm font-bold text-slate-900">Rekapitulasi Fee</h2>
               <p className="text-xs text-slate-500" aria-live="polite">
-                {listLoading ? "Memuat…" : `${filtered.length} data`}
+                {listLoading
+                  ? "Memuat…"
+                  : listTotal === 0
+                    ? "0 data"
+                    : `Menampilkan ${rangeStart}–${rangeEnd} dari ${listTotal} data`}
                 {periode !== "SEMUA" && ` · ${formatPeriode(periode)}`}
               </p>
             </div>
-            {!listLoading && !listError && listTruncated && (
-              <p role="alert" className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs font-medium text-amber-800">
-                Menampilkan {dataset.length} dari {listTotal} baris (batas muat 1000, selaras cap PostgREST max_rows) —
-                gunakan filter periode atau pencarian PPID untuk melihat sisanya.
-                Ringkasan Total Loket &amp; Fee di atas tetap dihitung dari seluruh data.
-              </p>
-            )}
             {listLoading ? (
               <div className="space-y-2 p-4" role="status" aria-label="Memuat fee">
                 {Array.from({ length: 6 }).map((_, i) => (
@@ -2059,13 +2131,13 @@ export default function FeeRekapPage() {
                 <p className="max-w-md text-sm text-slate-500">{listError}</p>
                 <button
                   type="button"
-                  onClick={() => void loadAll()}
+                  onClick={() => void loadPage()}
                   className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
                 >
                   Coba Lagi
                 </button>
               </div>
-            ) : dataset.length === 0 ? (
+            ) : listTotal === 0 && !hasQuery && periode === "SEMUA" ? (
               <div className="flex flex-col items-center justify-center px-4 py-16 text-center">
                 <span className="mb-4 flex size-14 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50">
                   <Inbox className="size-7 text-slate-300" aria-hidden />
@@ -2084,7 +2156,7 @@ export default function FeeRekapPage() {
                   Buka Upload Excel
                 </button>
               </div>
-            ) : filtered.length === 0 ? (
+            ) : listTotal === 0 ? (
               <div className="flex flex-col items-center justify-center px-4 py-16 text-center">
                 <span className="mb-4 flex size-14 items-center justify-center rounded-2xl border border-slate-200 bg-slate-50">
                   <Inbox className="size-7 text-slate-300" aria-hidden />
@@ -2119,7 +2191,7 @@ export default function FeeRekapPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {pageRows.map((row, i) => (
+                      {rows.map((row, i) => (
                         <tr
                           key={row.id}
                           className="border-b border-slate-100 transition-colors last:border-0 hover:bg-emerald-50/50"
@@ -2192,6 +2264,16 @@ export default function FeeRekapPage() {
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 bg-slate-50/60 px-4 py-3">
                   <p className="text-xs font-medium text-slate-500">
                     Hal {safePage}/{totalPages}
+                    {listTotal > 0 && (
+                      <span className="ml-2 text-slate-400">
+                        ({rangeStart}–{rangeEnd} dari {listTotal} baris)
+                      </span>
+                    )}
+                    {hasMorePages && (
+                      <span className="ml-2 text-slate-400">
+                        · ada baris di halaman berikutnya
+                      </span>
+                    )}
                   </p>
                   <div className="flex items-center gap-1">
                     <button

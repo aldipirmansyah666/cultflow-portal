@@ -13,6 +13,17 @@ export const MAX_EXCEL_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
  */
 export const MAX_FEE_EXCEL_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
 
+/**
+ * Batas khusus Reconcile Validator: 15 MB (berkas rekon ±20.000 baris
+ * ≈ 2–4 MB, jadi headroom 15 MB lega).
+ *
+ * Wajib: modul reconcile membaca berkas sepenuhnya ke memori
+ * (`file.arrayBuffer()` + matriks exceljs). Tanpa batas, satu file
+ * ratusan MB bisa menghabiskan heap browser → tab crash (Aw, Snap)
+ * tanpa pesan error yang bisa dibaca user.
+ */
+export const MAX_RECONCILE_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
+
 export function validateFileSize(
   file: File,
   maxBytes = MAX_EXCEL_SIZE_BYTES

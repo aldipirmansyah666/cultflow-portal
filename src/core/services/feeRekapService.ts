@@ -14,7 +14,16 @@ export interface FeeRincian {
   nilai: number;
 }
 
-export type FeeAuditFlag = "OVER_DEDUCTED_CLAMPED";
+/**
+ * Penanda audit pada baris fee.
+ * - `OVER_DEDUCTED_CLAMPED` — total mentah negatif lalu dipaksa 0.
+ * - `OVER_DEDUCTED_POTONGAN` — total bruto tetap dipakai, tetapi
+ *   akumulasi potongan melebihi fee bruto (tidak lagi "mengurangi"
+ *   total; ditandai agar selisihnya tak hilang diam-diam).
+ */
+export type FeeAuditFlag =
+  | "OVER_DEDUCTED_CLAMPED"
+  | "OVER_DEDUCTED_POTONGAN";
 
 export interface FeeRekapRow {
   id: string;
@@ -27,9 +36,11 @@ export interface FeeRekapRow {
   rincian: FeeRincian[];
   updatedAt: string;
   /**
-   * Penanda audit clamp: diisi "OVER_DEDUCTED_CLAMPED" bila total mentah
-   * (fee + potongan) negatif dan dipaksa ke 0 agar koreksi finansial
-   * tidak hilang tanpa jejak. Lihat `clampFeeTotal()`.
+   * Penanda audit:
+   * - `OVER_DEDUCTED_CLAMPED` — total mentah negatif lalu dipaksa ke 0
+   *   agar koreksi finansial tidak hilang tanpa jejak (`clampFeeTotal`).
+   * - `OVER_DEDUCTED_POTONGAN` — akumulasi potongan melebihi fee bruto;
+   *   total tetap bruto, selisihnya hanya dilaporkan.
    */
   auditFlag?: FeeAuditFlag;
   /**
@@ -417,6 +428,76 @@ export function clampFeeTotal(raw: number): {
   const rounded = Number.isFinite(raw) ? Math.round(raw) : 0;
   if (rounded < 0) return { total: 0, clamped: true, raw: rounded };
   return { total: rounded, clamped: false, raw: rounded };
+}
+
+// ---------------------------------------------------------------------------
+// TOTAL FEE — SATU-SATUNYA definisi (GROSS)
+// ---------------------------------------------------------------------------
+
+/**
+ * Komponen pembentuk TOTAL FEE.
+ *
+ * Kontrak: TOTAL FEE adalah nilai BRUTO (GROSS) periode — fee bulan
+ * berjalan + fee bulan sebelumnya + subsidi antar loket (E14 sheet
+ * `Cari`). Potongan/hold TIDAK pernah mengurangi total; nilainya tetap
+ * transparan di rincian (dan di field terpisah `totalFeeTransfer`
+ * untuk Master).
+ */
+export interface TotalFeeInput {
+  /**
+   * Sumber utama total: kolom total fee pada sheet ("Total Fee"/
+   * "Jumlah Fee") atau `total_fee` tersimpan (readback DB).
+   */
+  fee?: number;
+  /** Komponen periode: fee bulan berjalan. */
+  feeBulanIni?: number;
+  /** Komponen periode: fee bulan sebelumnya. */
+  feeBulanSebelumnya?: number;
+  /** Komponen periode: subsidi antar loket. */
+  subsidiAntarLoket?: number;
+  /**
+   * Kolom "JUMLAH FEE" (191) — fallback untuk baris tanpa rincian
+   * periode (mis. baris legacy yang hanya punya kolom total).
+   */
+  jumlahFee?: number;
+}
+
+/**
+ * Hitung TOTAL FEE dengan definisi tunggal (GROSS).
+ *
+ * Urutan sumber (pertama yang bernilai non-nol):
+ * 1. `fee` — total yang dinyatakan sumber (kolom total fee sheet /
+ *    `total_fee` tersimpan).
+ * 2. Komponen periode: `feeBulanIni + feeBulanSebelumnya +
+ *    subsidiAntarLoket` (E14 Master).
+ * 3. `jumlahFee` — kolom "JUMLAH FEE" (191) sebagai fallback legacy.
+ *
+ * PENTING: fungsi ini TIDAK PERNAH mengurangi potongan/hold. Nilai
+ * bruto tetap utuh; pengurangan hanya terjadi pada field terpisah
+ * (`totalFeeTransfer` = total − potongan lain − ongkir) dan pada
+ * rincian transparan. Semua parser (Master, dinamis, absolut, legacy)
+ * WAJIB memakai fungsi ini agar tidak ada definisi total yang berbeda.
+ */
+export function computeTotalFee(input: TotalFeeInput): number {
+  const n = (v: number | undefined): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : 0;
+
+  // 1. Total yang dinyatakan sumber.
+  if (input.fee !== undefined) {
+    const fee = n(input.fee);
+    if (fee !== 0) return fee;
+  }
+
+  // 2. Komponen periode (E14 Master: Bulan Ini + Bulan Sebelumnya + Subsidi).
+  const gross =
+    n(input.feeBulanIni) + n(input.feeBulanSebelumnya) + n(input.subsidiAntarLoket);
+  if (gross !== 0) return gross;
+
+  // 3. Fallback legacy: kolom "JUMLAH FEE" (191).
+  const jumlah = n(input.jumlahFee);
+  if (jumlah !== 0) return jumlah;
+
+  return 0;
 }
 
 /**
@@ -938,7 +1019,11 @@ export interface FeeParseAudit {
   allZero: boolean;
   /** Sel fee berformula tanpa nilai tersimpan (khas .xlsb bermasalah). */
   formulaWithoutValue: number;
-  /** Baris yang total mentahnya negatif lalu di-clamp ke 0 (OVER_DEDUCTED_CLAMPED). */
+  /**
+   * Baris dengan anomali total: total mentah negatif lalu di-clamp ke 0
+   * (OVER_DEDUCTED_CLAMPED) atau akumulasi potongan melebihi fee bruto
+   * (OVER_DEDUCTED_POTONGAN).
+   */
   clampedFeeRows: number;
   samples: FeeAuditSample[];
 }
@@ -1139,8 +1224,9 @@ export function detectFeeHeader(
  * PPID > Kode Agen/Loket; "Nama Loket"/"Nama Agen" > "Loket"/"Agen";
  * "Total Fee" > "Fee" > Nominal/Komisi. Satu kolom fisik tidak boleh
  * memegang dua peran (anti tabrakan "Kode Loket").
- * Kolom potongan (Potongan/Denda/Admin/PPh/...) dijumlahkan sebagai
- * pengurang dengan rincian sendiri; STATUS/PERIODE opsional.
+ * Kolom potongan (Potongan/Denda/Admin/PPh/...) dicatat sebagai rincian
+ * terpisah — TIDAK mengurangi total fee (GROSS, lihat `computeTotalFee`);
+ * STATUS/PERIODE opsional.
  * Ekor kosong dipangkas dulu agar `skipped` akurat.
  * `periodeFallback` dipakai bila file tidak memuat kolom periode valid.
  * `opts` opsional (FeeParseOptions): hint baris header, baris data
@@ -1428,11 +1514,17 @@ function buildRowsFromDetection(
       nilai: -Math.abs(parseAmount(cells[c.index])),
     }));
     const totalPotongan = potonganList.reduce((s, d) => s + d.nilai, 0);
-    // Clamp terpusat + flag audit: over-potongan / fee negatif TIDAK
-    // boleh hilang diam-diam via Math.max(0, ...).
-    const clamped = clampFeeTotal(fee + totalPotongan);
+    // TOTAL FEE = fee BRUTO kolom sheet (GROSS) — definisi tunggal
+    // `computeTotalFee`. Potongan/hold TIDAK lagi mengurangi total; ia
+    // tetap tampil terpisah di rincian (lihat `rincian` di bawah) dan
+    // tidak hilang diam-diam.
+    const grossTotal = computeTotalFee({ fee });
+    const clamped = clampFeeTotal(grossTotal);
     const totalFee = clamped.total;
-    if (clamped.clamped) clampedFeeRows += 1;
+    // Audit over-deduction: akumulasi potongan melebihi fee bruto.
+    // Tidak mengubah total (total tetap bruto), hanya ditandai.
+    const overDeducted = !clamped.clamped && grossTotal + totalPotongan < 0;
+    if (clamped.clamped || overDeducted) clampedFeeRows += 1;
     // Fallback nama: kolom Excel -> PPID (data master/API menyusul di UI).
     const namaLoket = nama !== "" ? nama : ppid;
     const status =
@@ -1448,9 +1540,20 @@ function buildRowsFromDetection(
       { label: feeHeaderLabel, nilai: fee },
       ...potonganList.filter((d) => d.nilai !== 0),
     ];
+    const auditFlag: FeeAuditFlag | undefined = clamped.clamped
+      ? "OVER_DEDUCTED_CLAMPED"
+      : overDeducted
+        ? "OVER_DEDUCTED_POTONGAN"
+        : undefined;
     if (clamped.clamped) {
       rincian.push({
         label: `OVER_DEDUCTED_CLAMPED (nilai asli ${clamped.raw})`,
+        nilai: 0,
+      });
+    } else if (overDeducted) {
+      // Selisih potongan vs fee bruto dilaporkan, TIDAK mengurangi total.
+      rincian.push({
+        label: `OVER_DEDUCTED_POTONGAN (potongan ${Math.abs(totalPotongan)} > fee bruto ${grossTotal})`,
         nilai: 0,
       });
     }
@@ -1463,7 +1566,7 @@ function buildRowsFromDetection(
       status,
       rincian,
       updatedAt: new Date().toISOString(),
-      ...(clamped.clamped ? { auditFlag: "OVER_DEDUCTED_CLAMPED" as const } : {}),
+      ...(auditFlag ? { auditFlag } : {}),
     });
   }
   const zeroFeeRows = rows.filter((x) => x.totalFee === 0).length;
@@ -1509,6 +1612,11 @@ export function buildFeeCsv(rows: FeeRekapRow[]): string {
 
 /** Teks slip ringkas untuk print / kirim ke agen via WA. */
 export function buildFeeSlipText(row: FeeRekapRow): string {
+  // TOTAL = fee BRUTO (definisi GROSS). Komponen potongan tidak
+  // mengurangi TOTAL; nilainya transparan di rincian dan dijumlahkan
+  // terpisah sebagai NETTO agar slip tak menimbulkan selisih silently.
+  const komponenTotal = row.rincian.reduce((s, d) => s + d.nilai, 0);
+  const adaPotongan = row.rincian.some((d) => d.nilai < 0);
   const lines = [
     `SLIP FEE LOKET/AGEN`,
     `PPID   : ${row.ppid}`,
@@ -1519,7 +1627,10 @@ export function buildFeeSlipText(row: FeeRekapRow): string {
       (d) => `${d.label}: ${formatRupiah(d.nilai)}`
     ),
     `------------------------------`,
-    `TOTAL  : ${formatRupiah(row.totalFee)}`,
+    ...(adaPotongan
+      ? [`NETTO  : ${formatRupiah(komponenTotal)} (setelah potongan)`]
+      : []),
+    `TOTAL  : ${formatRupiah(row.totalFee)} (bruto)`,
     `Status : ${row.status === "TERBAYAR" ? "TERBAYAR" : "PENDING"}`,
   ];
   return lines.join("\n");
@@ -1768,7 +1879,8 @@ function normalizeRincian(value: unknown, totalFee: number): FeeRincian[] {
 /** Petakan satu baris `fee_loket` ke `FeeRekapRow` UI. */
 export function toFeeRekapRow(row: FeeDbRow): FeeRekapRow {  // parseAmount menerima Number/bigint maupun String numerik ("1500000")
   // dari PostgREST; clamp negatif ke 0 HANYA via clampFeeTotal + flag.
-  const clamped = clampFeeTotal(parseAmount(row.total_fee));
+  // TOTAL FEE memakai definisi tunggal `computeTotalFee` (GROSS).
+  const clamped = clampFeeTotal(computeTotalFee({ fee: parseAmount(row.total_fee) }));
   const totalFee = clamped.total;
   const rincian = normalizeRincian(row.rincian, totalFee);
   if (clamped.clamped) {
@@ -1841,10 +1953,16 @@ export function toFeeRekapRowFromProfil(row: LoketProfilDbRow): FeeRekapRow {
   const feeBulanIni = parseAmount(row.fee_bulan_ini);
   const feeBulanSebelumnya = parseAmount(row.fee_bulan_sebelumnya);
   const subsidi = parseAmount(row.subsidi_antar_loket);
-  let totalFee = parseAmount(row.total_fee);
-  if (totalFee === 0) {
-    totalFee = feeBulanIni + feeBulanSebelumnya + subsidi;
-  }
+  // TOTAL FEE (definisi tunggal GROSS): `total_fee` tersimpan diutamakan
+  // (sumber kebenaran DB), bila kosong dihitung ulang dari komponen
+  // periode E14 (Bulan Ini + Bulan Sebelumnya + Subsidi) agar baris lama
+  // (pra-migrasi extra) tidak tampil Rp 0.
+  const totalFee = computeTotalFee({
+    fee: parseAmount(row.total_fee),
+    feeBulanIni,
+    feeBulanSebelumnya,
+    subsidiAntarLoket: subsidi,
+  });
   const clamped = clampFeeTotal(totalFee);
   const statusRaw = normalizeLoketStatusInput(row.status_pembayaran);
   const status: FeeStatus = isPaidStatus(statusRaw) ? "TERBAYAR" : "PENDING";
@@ -1960,9 +2078,14 @@ export function toFeeDbRow(
   const periode = FEE_PERIODE_REGEX.test(fallbackPeriode) ? fallbackPeriode : "";
   if (periode === "") return null;
   // Defensif: terima snake_case (kontrak API) maupun camelCase (client).
-  const rawTotal = parseAmount(
-    item.total_fee ?? (item as { totalFee?: unknown }).totalFee
-  );
+  // Nilai yang disimpan adalah TOTAL FEE GROSS (definisi tunggal
+  // `computeTotalFee`) — sudah dihitung parser di sisi client, di sini
+  // hanya dinormalisasi (bukan dikurangi potongan).
+  const rawTotal = computeTotalFee({
+    fee: parseAmount(
+      item.total_fee ?? (item as { totalFee?: unknown }).totalFee
+    ),
+  });
   const statusRaw = cleanFeeStr(item.status, 20).toUpperCase();
   const status: FeeStatus = statusRaw === "TERBAYAR" ? "TERBAYAR" : "PENDING";
   const namaLoket =
@@ -2112,6 +2235,32 @@ export async function fetchFeeList(params: FeeListParams = {}): Promise<FeeListR
     periods: body.periods ?? [],
     summary: body.summary ?? { totalLoket: 0, totalTerbayarAktif: 0, latestPeriode: "" },
   };
+}
+
+/**
+ * Ambil SEMUA baris yang cocok filter (q + periode) dengan|pages
+ * iteratif di server. Dipakai untuk ekspor (CSV/Excel) & verifikasi
+ * pasca-impor agar tidak ada baris yang terpotong diam-diam — tabel
+ * utama memakai paginasi server, bukan pemuatan 1.000 baris lokal.
+ *
+ * `maxPages` membatasi jumlah request (50 x 1.000 = 50.000 baris);
+ * bila data melebihi batas itu, `truncated` = true sehingga pemanggil
+ * bisa memberi tahu user (tidak pernah diam-diam memotong).
+ */
+export async function fetchAllFeeList(
+  params: Omit<FeeListParams, "page" | "pageSize"> = {},
+  maxPages = 50
+): Promise<{ data: FeeRekapRow[]; total: number; truncated: boolean }> {
+  const pageSize = 1000;
+  const rows: FeeRekapRow[] = [];
+  let total = 0;
+  for (let page = 1; page <= Math.max(1, maxPages); page += 1) {
+    const res = await fetchFeeList({ ...params, page, pageSize });
+    total = res.total;
+    rows.push(...res.data);
+    if (res.data.length === 0 || rows.length >= res.total) break;
+  }
+  return { data: rows, total, truncated: rows.length < total };
 }
 
 /** Muat riwayat upload dari API. */
@@ -3027,7 +3176,13 @@ export function parseLoketBsbFull(
     const jumlahFee = at(LOKET_SUMMARY_COLS.jumlahFee);
     const subsidiAntarLoket = at(LOKET_SUMMARY_COLS.subsidi);
     // E14 sheet `Cari`: Total Fee = Bulan Ini + Bulan Sebelumnya + Subsidi.
-    const totalFee = feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket;
+    // Definisi tunggal GROSS — `computeTotalFee` (potongan/hold TIDAK
+    // mengurangi total; lihat `totalFeeTransfer` untuk nilai transfer).
+    const totalFee = computeTotalFee({
+      feeBulanIni,
+      feeBulanSebelumnya,
+      subsidiAntarLoket,
+    });
     const minus = at(LOKET_SUMMARY_COLS.minus);
     const hold = at(LOKET_SUMMARY_COLS.hold);
     // E17/E18: potongan ditampilkan terpisah seperti Excel (dulu 194+195
@@ -3085,13 +3240,20 @@ export function parseLoketBsbFull(
     };
     profiles.push(profil);
 
-    // Baris ringkas monitoring: total = JUMLAH FEE (191) fallback
-    // BULAN INI (189) — prioritas sama seperti ABSOLUTE_FEE_COLS.
+    // Baris ringkas monitoring: TOTAL FEE memakai definisi GROSS yang
+    // sama dengan profil Master (Bulan Ini + Bulan Sebelumnya + Subsidi).
+    // Fallback kolom "JUMLAH FEE" (191) hanya dipakai bila baris tidak
+    // punya rincian periode — mencegah Rp 0 tanpa mengubah definisi.
     // Status tabel tetap biner: terbayar bila dana terbukti keluar
     // (Total Transfer / deposit / transfer ke rekening ada yang > 0).
     const paid =
       totalTransfer > 0 || feeKeDeposit > 0 || feeTransferRekening > 0;
-    const rawTotal = jumlahFee !== 0 ? jumlahFee : feeBulanIni;
+    const rawTotal = computeTotalFee({
+      feeBulanIni,
+      feeBulanSebelumnya,
+      subsidiAntarLoket,
+      jumlahFee,
+    });
     const clamped = clampFeeTotal(rawTotal);
     const rincian: FeeRincian[] = [
       { label: "Fee Bulan Ini", nilai: feeBulanIni },
@@ -3316,8 +3478,13 @@ export function parseCariSheet(
   const feeBulanIni = numFields.feeBulanIni ?? 0;
   const feeBulanSebelumnya = numFields.feeBulanSebelumnya ?? 0;
   const subsidiAntarLoket = numFields.subsidiAntarLoket ?? 0;
-  // E14 sheet `Cari`: Total Fee = Bulan Ini + Bulan Sebelumnya + Subsidi.
-  const totalFee = feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket;
+  // E14 sheet `Cari`: Total Fee = Bulan Ini + Bulan Sebelumnya + Subsidi
+  // (definisi GROSS tunggal — `computeTotalFee`).
+  const totalFee = computeTotalFee({
+    feeBulanIni,
+    feeBulanSebelumnya,
+    subsidiAntarLoket,
+  });
   const minus = numFields.minus ?? 0;
   const hold = numFields.hold ?? 0;
   const potonganLainnya = numFields.potonganLainnya ?? 0;
@@ -3664,7 +3831,14 @@ export function toLoketProfileDbRow(
     fee_bulan_ini: parseAmount(profil.feeBulanIni),
     fee_bulan_sebelumnya: parseAmount(profil.feeBulanSebelumnya),
     subsidi_antar_loket: parseAmount(profil.subsidiAntarLoket),
-    total_fee: parseAmount(profil.totalFee),
+    // TOTAL FEE GROSS (definisi tunggal `computeTotalFee`): nilai profil
+    // diutamakan, fallback ke komponen periode E14 bila kosong.
+    total_fee: computeTotalFee({
+      fee: parseAmount(profil.totalFee),
+      feeBulanIni: parseAmount(profil.feeBulanIni),
+      feeBulanSebelumnya: parseAmount(profil.feeBulanSebelumnya),
+      subsidiAntarLoket: parseAmount(profil.subsidiAntarLoket),
+    }),
     minus: parseAmount(profil.minus),
     hold: parseAmount(profil.hold),
     potongan_lainnya: parseAmount(profil.potonganLainnya),
@@ -3746,13 +3920,18 @@ export function normalizeImportProfil(
     feeBulanIni: parseAmount(p.feeBulanIni ?? p.fee_bulan_ini),
     feeBulanSebelumnya: parseAmount(p.feeBulanSebelumnya ?? p.fee_bulan_sebelumnya),
     subsidiAntarLoket: parseAmount(p.subsidiAntarLoket ?? p.subsidi_antar_loket),
-    totalFee: parseAmount(
-      p.totalFee ??
-        p.total_fee ??
-        (parseAmount(p.feeBulanIni ?? p.fee_bulan_ini) +
-          parseAmount(p.feeBulanSebelumnya ?? p.fee_bulan_sebelumnya) +
-          parseAmount(p.subsidiAntarLoket ?? p.subsidi_antar_loket))
-    ),
+    // TOTAL FEE: definisi GROSS tunggal. `totalFee` dari payload diutamakan;
+    // bila kosong dihitung dari komponen periode E14.
+    totalFee: computeTotalFee({
+      fee: parseAmount(p.totalFee ?? p.total_fee),
+      feeBulanIni: parseAmount(p.feeBulanIni ?? p.fee_bulan_ini),
+      feeBulanSebelumnya: parseAmount(
+        p.feeBulanSebelumnya ?? p.fee_bulan_sebelumnya
+      ),
+      subsidiAntarLoket: parseAmount(
+        p.subsidiAntarLoket ?? p.subsidi_antar_loket
+      ),
+    }),
     minus: parseAmount(p.minus),
     hold: parseAmount(p.hold),
     potonganLainnya: parseAmount(p.potonganLainnya ?? p.potongan_lainnya),
@@ -3856,11 +4035,15 @@ export async function fetchLoketLookup(
     pr.fee_bulan_sebelumnya ?? pr.feeBulanSebelumnya
   );
   const subsidiAntarLoket = num(pr.subsidi_antar_loket ?? pr.subsidiAntarLoket);
-  // total_fee tersimpan diutamakan; fallback hitung E14 agar baris lama
-  // (pra-migrasi extra) tidak tampil Rp 0.
-  const totalFee =
-    num(pr.total_fee ?? pr.totalFee) ||
-    feeBulanIni + feeBulanSebelumnya + subsidiAntarLoket;
+  // TOTAL FEE: `total_fee` tersimpan diutamakan; fallback hitung E14
+  // (Bulan Ini + Bulan Sebelumnya + Subsidi) agar baris lama
+  // (pra-migrasi extra) tidak tampil Rp 0. Definisi GROSS tunggal.
+  const totalFee = computeTotalFee({
+    fee: num(pr.total_fee ?? pr.totalFee),
+    feeBulanIni,
+    feeBulanSebelumnya,
+    subsidiAntarLoket,
+  });
   const profile: LoketLookupProfile = {
     ppid: String(pr.ppid ?? ""),
     namaLoket: String(pr.nama_loket ?? pr.namaLoket ?? ""),

@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KurLog Portal v2 — Diagram Arsitektur Sistem Interaktif</title>
+<style>
+:root{--bg:#0b1220;--bg2:#0f1a30;--card:#13223d;--card2:#182c4e;--line:#274067;--txt:#e8eefb;--mut:#9db1d1;--acc:#38bdf8;--acc2:#a78bfa;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--green:#22c55e}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,system-ui,-apple-system,Arial,sans-serif;background:linear-gradient(180deg,var(--bg),#070c17);color:var(--txt)}
+header{position:sticky;top:0;z-index:20;background:rgba(11,18,32,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.wrap{max-width:1240px;margin:0 auto;padding:18px 20px}
+.hrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.badge{font-size:12px;padding:4px 10px;border:1px solid var(--line);border-radius:999px;color:var(--mut);background:#0d1730}
+.badge b{color:var(--acc)}
+h1{font-size:22px;margin:6px 0 2px}h1 span{color:var(--acc)}
+.sub{color:var(--mut);font-size:13.5px;margin:0}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.tabs button{border:1px solid var(--line);background:#0d1730;color:var(--txt);padding:9px 14px;border-radius:10px;cursor:pointer;font-size:13px;font-weight:600}
+.tabs button.active{background:linear-gradient(90deg,#0ea5e9,#8b5cf6);border-color:transparent}
+.tabs button:hover{border-color:var(--acc)}
+.grid2{display:grid;grid-template-columns:1.55fr .9fr;gap:16px;margin-top:16px}
+@media(max-width:980px){.grid2{grid-template-columns:1fr}}
+.card{background:linear-gradient(180deg,var(--card),var(--bg2));border:1px solid var(--line);border-radius:14px;padding:16px}
+.card h2{font-size:15px;margin:0 0 4px;letter-spacing:.2px}
+.card p.desc{color:var(--mut);font-size:12.5px;margin:0 0 12px}
+svg.arch{width:100%;height:auto;background:#0a1326;border:1px solid var(--line);border-radius:12px}
+.node{cursor:pointer;transition:.15s}
+.node rect{stroke-width:1.5}
+.node:hover rect{filter:brightness(1.25)}
+.node text{font-size:11px;font-weight:700;fill:#07101f}
+.node .sub2{font-size:9.5px;font-weight:600;fill:#0b1a33;opacity:.85}
+.edge{stroke:#3b5a8a;stroke-width:1.6;fill:none}
+.edge.lbl{stroke-dasharray:5 4}
+.elbl{font-size:9.5px;fill:var(--mut)}
+#detail{position:sticky;top:86px}
+#detail h3{margin:0 0 6px;font-size:16px}
+#detail .path{font-family:Consolas,monospace;font-size:11.5px;color:var(--acc);background:#081226;border:1px solid var(--line);padding:7px 9px;border-radius:8px;word-break:break-all}
+#detail ul{margin:10px 0 0;padding-left:18px;color:#d6e2f7;font-size:13px;line-height:1.55}
+.kv{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.kv span{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 9px;color:var(--mut)}
+.flow{display:flex;flex-direction:column;gap:0;margin-top:8px}
+.step{display:grid;grid-template-columns:34px 1fr;gap:10px;padding:11px 10px;border:1px solid var(--line);border-radius:12px;margin-bottom:10px;background:#0d1a33;cursor:pointer}
+.step:hover{border-color:var(--acc)}
+.step .n{width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-weight:800;background:linear-gradient(135deg,#0ea5e9,#8b5cf6);color:#fff;font-size:14px}
+.step h4{margin:0;font-size:13.5px}
+.step small{color:var(--mut);font-size:12px}
+.step .more{display:none;color:#d6e2f7;font-size:12.5px;margin-top:7px;line-height:1.6;border-top:1px dashed var(--line);padding-top:7px}
+.step.open .more{display:block}
+.step code{font-family:Consolas,monospace;font-size:11px;color:#7dd3fc;background:#071224;padding:1px 5px;border-radius:5px}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
+th,td{text-align:left;padding:8px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--acc);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
+td code{font-family:Consolas,monospace;font-size:11px;color:#7dd3fc}
+tr:hover td{background:rgba(56,189,248,.06)}
+.search{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#081226;color:var(--txt);margin:10px 0}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--mut);margin-top:10px}
+.dot{width:11px;height:11px;border-radius:3px;display:inline-block;margin-right:5px;vertical-align:middle}
+footer{color:var(--mut);font-size:12px;padding:22px;text-align:center}
+.view{display:none}.view.active{display:block}
+.alert{border:1px solid #7c2d12;background:#1c0f08;color:#fed7aa;font-size:12.5px;border-radius:10px;padding:10px 12px;margin-top:12px}
+.okbox{border:1px solid #14532d;background:#07190f;color:#bbf7d0;font-size:12.5px;border-radius:10px;padding:10px 12px;margin-top:12px}
+.mono{font-family:Consolas,monospace;font-size:11px}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+<div class="hrow"><div style="font-size:26px">📦</div><div><h1>KurLog Portal <span>v2 — Archify Architecture Map</span></h1><p class="sub">Next.js 16 App Router · React 19 · Tailwind 4 · Supabase Postgres (service_role-only) · JWT cookie + bcrypt · exceljs · jose — Analisis menyeluruh repo <span class="mono">C:\PROJECT\kurlog-portal-v2</span></p></div></div>
+<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><span class="badge">Routes UI: <b>10 pages</b></span><span class="badge">API routes: <b>16 endpoints</b></span><span class="badge">Tabel Supabase: <b>8</b></span><span class="badge">Waybill = tabel <b>resi</b></span><span class="badge">Bailout UI: <b>stateless</b> (tanpa tulis DB)</span><span class="badge">Skill Archify: <b>tidak ditemukan</b> → analisis manual</span></div>
+<div class="tabs" id="tabs">
+<button class="active" data-v="overview">1 · Overview Sistem</button>
+<button data-v="routes">2 · UI / Routes</button>
+<button data-v="supabase">3 · Supabase + API</button>
+<button data-v="waybill">4 · Alur Waybill (resi)</button>
+<button data-v="bailout">5 · Alur Bailout</button>
+<button data-v="ops">6 · Bagging · Fee · Reconcile</button>
+</div>
+</div></header>
+<div class="wrap">
+
+<!-- OVERVIEW -->
+<section class="view active" id="v-overview">
+<div class="grid2">
+<div class="card"><h2>🗺️ Diagram Arsitektur — klik node untuk detail</h2><p class="desc">Pola inti: Page (Client tipis) → <code>fetch(/api/...)</code> → Route handler (verifikasi JWT + <code>getSupabaseAdmin()</code> service_role) → Service di <code>src/core/services</code> → Supabase Postgres. RLS lockdown: browser <code>anon</code> selalu ditolak.</p>
+<svg class="arch" viewBox="0 0 760 560" id="archSvg" role="img" aria-label="Arsitektur">
+<!-- layers -->
+<rect x="10" y="10" width="740" height="90" rx="12" fill="#0e1c36" stroke="#274067"/>
+<text x="24" y="30" fill="#9db1d1" font-size="11" font-weight="800">LAYER 1 · CLIENT (Next.js App Router + Tailwind + lucide + radix)</text>
+<rect x="10" y="112" width="740" height="120" rx="12" fill="#101f3c" stroke="#274067"/>
+<text x="24" y="132" fill="#9db1d1" font-size="11" font-weight="800">LAYER 2 · SERVER (API Routes + proxy.ts guard + lib/session JWT + parsers murni)</text>
+<rect x="10" y="244" width="740" height="130" rx="12" fill="#0d1a33" stroke="#274067"/>
+<text x="24" y="264" fill="#9db1d1" font-size="11" font-weight="800">LAYER 3 · DATA ACCESS (core/services + supabase server client service_role)</text>
+<rect x="10" y="386" width="740" height="164" rx="12" fill="#081226" stroke="#38bdf8" stroke-dasharray="6 4"/>
+<text x="24" y="406" fill="#38bdf8" font-size="11" font-weight="800">LAYER 4 · SUPABASE POSTGRES (RLS service_role-only · 8 tabel · 2 RPC)</text>
+<!-- L1 nodes -->
+<g class="node" data-k="dashboard"><rect x="24" y="40" width="128" height="48" rx="10" fill="#38bdf8"/><text x="34" y="60">/ Dashboard</text><text x="34" y="74" class="sub2">app/page.tsx</text></g>
+<g class="node" data-k="resi"><rect x="160" y="40" width="128" height="48" rx="10" fill="#34d399"/><text x="170" y="60">/monitoring-resi</text><text x="170" y="74" class="sub2">waybill · CRUD</text></g>
+<g class="node" data-k="bailout"><rect x="296" y="40" width="128" height="48" rx="10" fill="#fbbf24"/><text x="306" y="60">/bailout</text><text x="306" y="74" class="sub2">stateless · WA</text></g>
+<g class="node" data-k="bagging"><rect x="432" y="40" width="110" height="48" rx="10" fill="#a78bfa"/><text x="442" y="60">/bagging</text><text x="442" y="74" class="sub2">group/agen</text></g>
+<g class="node" data-k="fee"><rect x="550" y="40" width="90" height="48" rx="10" fill="#f472b6"/><text x="560" y="60">/fee-rekap</text><text x="560" y="74" class="sub2">slip+import</text></g>
+<g class="node" data-k="etc"><rect x="648" y="40" width="88" height="48" rx="10" fill="#94a3b8"/><text x="656" y="60">+5 pages</text><text x="656" y="74" class="sub2">login·data·dll</text></g>
+<!-- L2 -->
+<g class="node" data-k="proxy"><rect x="24" y="142" width="150" height="48" rx="10" fill="#fbbf24"/><text x="34" y="162">proxy.ts guard</text><text x="34" y="176" class="sub2">redirect /login</text></g>
+<g class="node" data-k="auth"><rect x="182" y="142" width="150" height="48" rx="10" fill="#38bdf8"/><text x="192" y="162">/api/auth/*</text><text x="192" y="176" class="sub2">login·me·logout</text></g>
+<g class="node" data-k="apiresi"><rect x="340" y="142" width="130" height="48" rx="10" fill="#34d399"/><text x="350" y="162">/api/resi</text><text x="350" y="176" class="sub2">GET·POST·PATCH</text></g>
+<g class="node" data-k="apidata"><rect x="478" y="142" width="130" height="48" rx="10" fill="#a78bfa"/><text x="488" y="162">/api/data-utama</text><text x="488" y="176" class="sub2">+lookup·import</text></g>
+<g class="node" data-k="apifee"><rect x="616" y="142" width="120" height="48" rx="10" fill="#f472b6"/><text x="626" y="162">/api/fee-rekap</text><text x="626" y="176" class="sub2">+verify·logs</text></g>
+<!-- L3 -->
+<g class="node" data-k="parser"><rect x="24" y="274" width="170" height="48" rx="10" fill="#e2e8f0"/><text x="34" y="294">core/parsers (murni)</text><text x="34" y="308" class="sub2">bagging·bailout·excel</text></g>
+<g class="node" data-k="svcresi"><rect x="202" y="274" width="150" height="48" rx="10" fill="#34d399"/><text x="212" y="294">resiService</text><text x="212" y="308" class="sub2">waybill logic</text></g>
+<g class="node" data-k="svcdata"><rect x="360" y="274" width="150" height="48" rx="10" fill="#a78bfa"/><text x="370" y="294">dataUtamaService</text><text x="370" y="308" class="sub2">agen CUM</text></g>
+<g class="node" data-k="svcfee"><rect x="518" y="274" width="130" height="48" rx="10" fill="#f472b6"/><text x="528" y="294">feeRekapService</text><text x="528" y="308" class="sub2">79 modul</text></g>
+<g class="node" data-k="sess"><rect x="656" y="274" width="80" height="48" rx="10" fill="#38bdf8"/><text x="664" y="294">session</text><text x="664" y="308" class="sub2">JWT·bcrypt</text></g>
+<!-- L4 -->
+<g class="node" data-k="t_resi"><rect x="24" y="416" width="130" height="48" rx="10" fill="#34d399"/><text x="34" y="436">resi (waybill)</text><text x="34" y="450" class="sub2">no_resi UNIQUE</text></g>
+<g class="node" data-k="t_utama"><rect x="162" y="416" width="150" height="48" rx="10" fill="#a78bfa"/><text x="172" y="436">data_lengkap_utama</text><text x="172" y="450" class="sub2">~95 kol · ppid UQ</text></g>
+<g class="node" data-k="t_bail"><rect x="320" y="416" width="110" height="48" rx="10" fill="#fbbf24"/><text x="330" y="436">bailout</text><text x="330" y="450" class="sub2">read-only dash</text></g>
+<g class="node" data-k="t_fee"><rect x="438" y="416" width="150" height="48" rx="10" fill="#f472b6"/><text x="448" y="436">fee/loket_*</text><text x="448" y="450" class="sub2">+2 RPC summary</text></g>
+<g class="node" data-k="t_users"><rect x="596" y="416" width="110" height="48" rx="10" fill="#38bdf8"/><text x="606" y="436">users</text><text x="606" y="450" class="sub2">ADMIN/USER</text></g>
+<!-- edges -->
+<path class="edge" d="M88 88 L88 142"/><path class="edge" d="M224 88 L400 142"/><path class="edge" d="M360 88 L360 142" /><path class="edge" d="M487 88 L540 142"/><path class="edge" d="M595 88 L676 142"/>
+<path class="edge" d="M100 190 L100 274"/><path class="edge" d="M257 190 L277 274"/><path class="edge" d="M405 190 L435 274"/><path class="edge" d="M543 190 L590 274"/>
+<path class="edge lbl" d="M277 322 L88 416"/><path class="edge" d="M435 322 L237 416"/><path class="edge lbl" d="M109 322 L375 416"/><path class="edge" d="M583 322 L513 416"/><path class="edge" d="M696 322 L651 416"/>
+</svg>
+<div class="legend"><span><i class="dot" style="background:#34d399"></i>Waybill (persist)</span><span><i class="dot" style="background:#fbbf24"></i>Bailout (stateless)</span><span><i class="dot" style="background:#a78bfa"></i>Agen / Data Utama</span><span><i class="dot" style="background:#f472b6"></i>Fee</span><span><i class="dot" style="background:#38bdf8"></i>Auth/Session</span><span>Garis putus-putus = baca agregat saja</span></div>
+<div class="alert">⚠️ Anomali: <code>NAV_ITEMS</code> mereferensikan <code>/logs</code> tetapi <code>src/app/logs/page.tsx</code> tidak ada → menu 404. <code>src/components/ui/</code> &amp; <code>src/modules/*</code> hanya <code>.gitkeep</code>. <code>zod</code> + <code>react-query</code> terinstal tapi 0 pemakaian (validasi manual + <code>useState+fetch</code>).</div>
+</div>
+<div class="card" id="detail"><h3>🔍 Detail Node</h3><p class="desc">Klik node diagram / daftar di tab lain untuk melihat file sumber, fungsi, dan alur.</p><div class="path" id="dPath">Pilih sebuah node…</div><div id="dBody"><ul><li><b>10 pages:</b> <code>/</code>, <code>/login</code>, <code>/bagging</code>, <code>/bailout</code>, <code>/data-utama</code>, <code>/fee-rekap</code>, <code>/lookup-agen</code>, <code>/monitoring-resi</code>, <code>/reconcile</code>, <code>/user-management</code></li><li><b>16 API endpoints</b> di <code>src/app/api/**</code></li><li><b>Auth:</b> bukan Supabase Auth — JWT <code>jose</code> cookie <code>cultflow_session</code> + <code>bcryptjs</code></li></ul></div><div class="kv" id="dTags"></div></div>
+</div>
+</section>
+
+<!-- ROUTES -->
+<section class="view" id="v-routes">
+<div class="card"><h2>🧭 Komponen UI / Routes utama</h2><p class="desc">Semua <code>page.tsx</code> adalah Client Component tipis; logika di <code>src/core</code>. Shell: <code>layout.tsx → LayoutShell → Sidebar + Header</code>. Cari untuk filter.</p><input class="search" id="qRoutes" placeholder="Filter route… mis. resi / bailout / fee"><div style="overflow:auto"><table id="tRoutes"><thead><tr><th>Route</th><th>File sumber</th><th>Fungsi (1 kalimat)</th><th>Data / Aksi</th></tr></thead><tbody>
+<tr><td><code>/</code></td><td><code>src/app/page.tsx</code></td><td>Dashboard CultFlow Ops (force-dynamic): stat cards + quick actions + lookup lazy</td><td><code>dashboardService.getDashboardStats</code> via service_role</td></tr>
+<tr><td><code>/login</code></td><td><code>src/app/login/page.tsx</code></td><td>Form login + sanitasi redirect anti-open-redirect</td><td><code>POST /api/auth/login</code></td></tr>
+<tr><td><code>/monitoring-resi</code></td><td><code>src/app/monitoring-resi/page.tsx</code></td><td>Tabel waybill: tab follow-up, filter tanggal, import copas chunk 200, bulk delete, modal status</td><td><code>/api/resi</code> (GET/POST/PATCH/DELETE)</td></tr>
+<tr><td><code>/bailout</code></td><td><code>src/app/bailout/page.tsx</code></td><td>Upload sheet CA / paste TSV → template WA per loket + ekspor CSV (stateless)</td><td><code>exceljs</code> dynamic import; tanpa fetch Supabase</td></tr>
+<tr><td><code>/bagging</code></td><td><code>src/app/bagging/page.tsx</code></td><td>Upload multi-Excel KurLog → grouping per agen + draft/copy/link WA via lookup no HP</td><td><code>baggingParser</code> + <code>/api/data-utama/lookup</code></td></tr>
+<tr><td><code>/data-utama</code></td><td><code>src/app/data-utama/page.tsx</code></td><td>Direktori agen paginasi 50, search debounce, filter regional, drawer 1xx bidang, import ADMIN</td><td><code>/api/data-utama*</code></td></tr>
+<tr><td><code>/fee-rekap</code></td><td><code>src/app/fee-rekap/page.tsx</code></td><td>Modul terbesar: monitoring slip ala sheet Cari + upload Master/BSB/Cari + PNG/clipboard + hapus ADMIN</td><td><code>/api/fee-rekap*</code> + 2 RPC</td></tr>
+<tr><td><code>/lookup-agen</code></td><td><code>src/app/lookup-agen/page.tsx</code></td><td>Lookup PPID/nama + autosuggest + kartu PosIND siap salin WA/cetak</td><td><code>/api/data-utama/lookup|suggest</code></td></tr>
+<tr><td><code>/reconcile</code></td><td><code>src/app/reconcile/page.tsx</code></td><td>Validator prefix EC3/PKH (scan semua sheet, breakdown, filter invalid-only)</td><td><code>reconcileHeader|Validator</code> lokal</td></tr>
+<tr><td><code>/user-management</code></td><td><code>src/app/user-management/page.tsx</code></td><td>CRUD users khusus ADMIN, proteksi hapus diri sendiri</td><td><code>/api/users</code></td></tr>
+<tr><td><code>/logs ⚠️ 404</code></td><td><code>(hilang) src/app/logs/page.tsx</code></td><td>Didefinisikan di NAV_ITEMS tapi file tidak ada</td><td>Perlu dibuat / hapus dari menu</td></tr>
+</tbody></table></div>
+<p class="desc" style="margin-top:10px">Layout &amp; shell: <code>src/app/layout.tsx</code> · <code>src/components/layout/LayoutShell.tsx</code> · <code>Sidebar.tsx</code> (filter by role) · <code>Header.tsx</code> · <code>src/core/types/navigation.ts</code> (NAV_ITEMS) · <code>loading.tsx / error.tsx / not-found.tsx / global-error.tsx</code></p></div>
+</section>
+
+<!-- SUPABASE -->
+<section class="view" id="v-supabase">
+<div class="grid2">
+<div class="card"><h2>🛢️ Integrasi Supabase — service_role-only</h2><p class="desc">Tidak ada Supabase Auth. Browser <code>getSupabaseBrowser() (anon)</code> hanya singleton; semua query lewat <code>getSupabaseAdmin() (service_role)</code> di API routes. RLS: <code>REVOKE ALL FROM anon,authenticated</code>.</p><input class="search" id="qTables" placeholder="Filter tabel…"><table id="tTables"><thead><tr><th>Tabel</th><th>Kolom kunci / constraint</th><th>Migrasi</th></tr></thead><tbody>
+<tr><td><code>resi (waybill)</code></td><td><code>no_resi UNIQUE NOT NULL, agen, layanan='PE', status_resi, status_fu, tgl_tiket, closed_at</code> + kolom live-only (<code>nomor_resi, is_selesai…</code>)</td><td><code>20260921_init_schema.sql:106-118</code></td></tr>
+<tr><td><code>data_lengkap_utama</code></td><td><code>~95 kolom, ppid UNIQUE WHERE ppid&lt;&gt;''</code> (agen CUM)</td><td><code>20260921 + 20260923_align_v2</code></td></tr>
+<tr><td><code>bailout</code></td><td><code>kode_loket, nama_loket, periode:date, nominal:bigint, raw_payload:jsonb — UNIQUE(kode_loket,periode)</code></td><td><code>20260921:123-132</code></td></tr>
+<tr><td><code>users</code></td><td><code>name, username UNIQUE, password(hash), role ADMIN/USER</code></td><td><code>20260921:137-144 + rls_lockdown</code></td></tr>
+<tr><td><code>fee_loket</code></td><td><code>ppid, periode, total_fee, status TERBAYAR/PENDING, rincian:jsonb — UNIQUE(ppid,periode)</code></td><td><code>20260924_fee_loket.sql</code></td></tr>
+<tr><td><code>fee_upload_logs</code></td><td>Log upload fee</td><td><code>20260924</code></td></tr>
+<tr><td><code>loket_profiles</code></td><td>1 baris = loket×periode (BSB+Cari + kolom slip: subsidi, transfer, potongan, deposit…)</td><td><code>20261002 + 20261003_master_extra</code></td></tr>
+<tr><td><code>loket_transaction_details</code></td><td>1 baris = modul×loket×periode (<code>modul_nama, jumlah_lembar, fee_per_lembar</code>)</td><td><code>20261002:64-74</code></td></tr>
+</tbody></table>
+<div class="okbox">✅ RPC <code>fee_rekap_summary()</code> (<code>20260925</code>) &amp; <code>loket_profiles_summary()</code> (<code>20261007</code>) — <code>SECURITY DEFINER</code>, dipanggil di <code>src/app/api/fee-rekap/route.ts:72,107</code> dengan fallback paginasi. Index trigram <code>pg_trgm</code> di <code>20261007/20261008</code>. Env: <code>NEXT_PUBLIC_SUPABASE_URL, ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, JWT_SECRET</code>.</div>
+</div>
+<div class="card"><h2>🔌 API Endpoints (16)</h2><p class="desc">Klik baris untuk menyalin path.</p><table id="tApi"><thead><tr><th>Method + Path</th><th>File</th></tr></thead><tbody>
+<tr><td><code>POST /api/auth/login</code></td><td><code>api/auth/login/route.ts</code></td></tr>
+<tr><td><code>GET /api/auth/me</code></td><td><code>api/auth/me/route.ts</code></td></tr>
+<tr><td><code>POST /api/auth/logout</code></td><td><code>api/auth/logout/route.ts</code></td></tr>
+<tr><td><code>GET,PATCH,POST,DELETE /api/users</code></td><td><code>api/users/route.ts</code></td></tr>
+<tr><td><code>GET,PATCH,POST,DELETE /api/resi</code></td><td><code>api/resi/route.ts</code></td></tr>
+<tr><td><code>GET /api/data-utama</code></td><td><code>api/data-utama/route.ts</code></td></tr>
+<tr><td><code>GET /api/data-utama/lookup</code></td><td><code>api/data-utama/lookup/route.ts</code></td></tr>
+<tr><td><code>GET /api/data-utama/suggest</code></td><td><code>api/data-utama/suggest/route.ts</code></td></tr>
+<tr><td><code>POST /api/data-utama/import</code></td><td><code>api/data-utama/import/route.ts</code></td></tr>
+<tr><td><code>GET /api/data-utama/regionals</code></td><td><code>api/data-utama/regionals/route.ts</code></td></tr>
+<tr><td><code>GET,DELETE /api/fee-rekap</code></td><td><code>api/fee-rekap/route.ts</code></td></tr>
+<tr><td><code>POST /api/fee-rekap/import</code></td><td><code>api/fee-rekap/import/route.ts</code></td></tr>
+<tr><td><code>GET /api/fee-rekap/lookup</code></td><td><code>api/fee-rekap/lookup/route.ts</code></td></tr>
+<tr><td><code>GET /api/fee-rekap/logs</code></td><td><code>api/fee-rekap/logs/route.ts</code></td></tr>
+<tr><td><code>POST /api/fee-rekap/verify</code></td><td><code>api/fee-rekap/verify/route.ts</code></td></tr>
+<tr><td><code>DELETE /api/fee-rekap/drop-all</code></td><td><code>api/fee-rekap/drop-all/route.ts</code></td></tr>
+</tbody></table>
+<div class="alert">🔒 Semua handler: <code>getSession(cookie cultflow_session)</code> → <code>getSupabaseAdmin()</code>. Guard halaman di <code>src/proxy.ts</code> (Next 16, bukan <code>middleware.ts</code>): public <code>/login</code>, gate ADMIN <code>/user-management|/admin*</code>, lolos <code>/_next|/api|static</code>.</div></div>
+</div>
+</section>
+
+<!-- WAYBILL -->
+<section class="view" id="v-waybill">
+<div class="grid2">
+<div class="card"><h2>📮 Alur Waybill (= tabel <code>resi</code>) — persist penuh</h2><p class="desc">Tidak ada tabel bernama <code>waybill</code> — domain waybill = <code>no_resi/nomor_resi</code>. Rantai: <code>monitoring-resi/page.tsx ⇄ api/resi/route.ts ⇄ resiService.ts</code>. Klik langkah untuk detail file:line.</p>
+<div class="flow" id="flowWaybill">
+<div class="step"><div class="n">1</div><div><h4>Import copas (paste)</h4><small>Modal textarea → parseResiCopasText (dedup case-insensitive, maks 500)</small><div class="more">UI <code>monitoring-resi/page.tsx:986-1026</code> → <code>POST /api/resi {rows}</code> (<code>:265</code>). Parser <code>resiService.ts:844-898</code>: <code>RESI_COPAS_MAX_ROWS=500 (:706)</code>, deteksi header <code>:721</code>, split kolom <code>:760</code>, tanggal <code>:781</code>. Validasi <code>toCopasItem() route.ts:238-272</code> (sanitasi <code>sanitizeNomorResi</code>, <code>normalizeFollowUpStatus</code>, regex <code>YYYY-MM-DD</code>).</div></div></div>
+<div class="step"><div class="n">2</div><div><h4>Check-merge tanpa upsert(onConflict)</h4><small>Lindungi downgrade SUDAH→BELUM; payload kunci ganda no_resi+nomor_resi</small><div class="more"><code>importResiBatch() resiService.ts:933-1023</code>: <code>select(id,nomor_resi,status_followup).in() :960</code> → <code>insert :983</code> → <code>update.eq(nomor_resi)</code> per baris <code>:1010</code>, proteksi <code>:1002-1008</code>. Toast sukses <code>monitoring-resi/page.tsx:283-284</code>.</div></div></div>
+<div class="step"><div class="n">3</div><div><h4>List / filter + purge kedaluwarsa</h4><small>Filter status, search resi/agen, range tanggal, order + pagination</small><div class="more"><code>fetch(/api/resi?status&amp;q&amp;page&amp;startDate&amp;endDate)</code> <code>:206</code> → <code>GET route.ts:32-78</code> → <code>getResiList/getMonitoringResiList :278-344</code> (<code>select RESI_LIST_COLUMNS :230,289</code>, <code>eq(status_followup/is_selesai) :293-299</code>, <code>or(ilike) :301-307</code>, <code>order(created_at DESC).range() :326-329</code>). <code>purgeExpiredResi</code> fire-and-forget <code>route.ts:65-70 → :158-195</code>: hapus <code>SELESAI/CLOSE + closed_at ≤ cutoff 2 hari</code>.</div></div></div>
+<div class="step"><div class="n">4</div><div><h4>Follow-up / update status</h4><small>Auto-close via regex delivered/diterima/retur; SELESAI wajib catatan</small><div class="more">Modal <code>:923-943</code> / dropdown <code>:790</code> → <code>PATCH {id,catatan,status}</code> (<code>:317,413 → route.ts:95-167</code>, wajib catatan <code>:133-138</code>) → <code>updateFollowUpStatus :475-539 / updateResiStatus :554-627</code>. <code>isAutoCloseNote() :129-137</code> → <code>SUDAH_FOLLOWUP+SELESAI+closed_at</code>; <code>appendHistoryLog() :397-437</code> format <code>[DD/MM/YYYY HH:mm - user]: note</code>.</div></div></div>
+<div class="step"><div class="n">5</div><div><h4>Hapus batch (ADMIN-only)</h4><small>Checkbox massal, chunk 500, batas 2000 ids</small><div class="more"><code>:678,738 → DELETE {id|ids[]} :419 → route.ts:170-228 (isAdminSession :175)</code> → <code>deleteResiBatch() :652-678</code> (<code>RESI_DELETE_MAX_IDS=2000 :644</code>, <code>delete().in(id,chunk).select(id) :667</code>).</div></div></div>
+</div></div>
+<div class="card"><h2>🧩 Service &amp; kolom kunci</h2><p class="desc">File: <code>src/core/services/resiService.ts</code> (~1000 baris), API: <code>src/app/api/resi/route.ts</code></p><div class="path">SELECT: id, no_resi, agen, layanan, status_resi, status_followup, is_selesai, catatan_followup, tgl_tiket, created_at, closed_at, followed_up_by/at</div><ul><li><b>Validasi manual</b> (tanpa zod): <code>sanitizeNomorResi :739</code>, <code>normalizeFollowUpStatus :360</code>, <code>normalizeFilterDate :243</code></li><li><b>State client:</b> tanpa react-query — <code>useState/useMemo + fetch</code> (<code>:206-468</code>)</li><li><b>Excel:</b> waybill tidak via exceljs — via copas; exceljs dipakai bagging/bailout/fee/reconcile via <code>lib/excel.ts</code></li><li><b>Istilah:</b> <code>waybill/AWB</code> hanya alias header reconcile (<code>reconcileHeader.ts:57</code>, <code>reconcile/page.tsx:117</code>)</li></ul><div class="kv"><span>POST import</span><span>GET list</span><span>PATCH follow-up</span><span>DELETE admin</span><span>purge &gt;2 hari</span></div></div>
+</div>
+</section>
+
+<!-- BAILOUT -->
+<section class="view" id="v-bailout">
+<div class="grid2">
+<div class="card"><h2>💸 Alur Bailout — stateless (tanpa tulis Supabase)</h2><p class="desc">Rantai: <code>bailout/page.tsx + bailoutParser.ts + bailoutMessage.ts</code>. Tabel <code>bailout</code> hanya dibaca dashboard. Klik langkah.</p>
+<div class="flow">
+<div class="step"><div class="n">1</div><div><h4>Input Excel (sheet CA)</h4><small>Magic-bytes + size → workbook → validasi matriks 20030×200</small><div class="more"><code>handleFileUpload() page.tsx:70-118</code>: <code>validateFileSize :74</code> → <code>loadWorkbookFromBuffer :93</code> (dynamic <code>await import(@/lib/excel) :84-85</code>) → <code>validateExcelMagicBytes :87</code> → sheet <code>CA</code> case-insensitive fallback pertama <code>:96-98</code> → <code>validateMatrixLimits(aoa,{maxRows:20030,maxCols:200}) :103</code> → <code>parseBailoutRowsFromAOA :104</code>.</div></div></div>
+<div class="step"><div class="n">2</div><div><h4>Parse: skor header + normalisasi</h4><small>KODE/NAMA/BAILOUT/PERIODE, Rp/( )/.,-/,, serial Excel, skip TOTAL, dedup last-wins</small><div class="more"><code>bailoutParser.ts:377-416</code>: <code>findHeaderRowIndex :230</code> (KODE+1/NAMA+1/BAILOUT+1/PERIODE+0.5, menang ≥3), alias <code>:137-169</code>, <code>normalizeKodeLoket :23</code>, <code>cleanBailoutValue :41-64</code>, <code>normalizePeriodeToISO :290-364</code> (YYYYMMDD/serial/DMY), skip TOTAL/JUMLAH, dedup kode <code>:386-415</code>.</div></div></div>
+<div class="step"><div class="n">3</div><div><h4>Input paste TSV alternatif</h4><small>Split TAB &gt; koma &gt; 2-spasi; periode kosong</small><div class="more"><code>handlePasteSubmit() :120-128</code> → <code>parseBailoutFromPaste() :423-484</code> (<code>:433-441</code>).</div></div></div>
+<div class="step"><div class="n">4</div><div><h4>Draft pesan WA + ekspor</h4><small>Sapaan personal, tanggal cetak H-1, template weekend vs weekday ≤09.00, CSV ;</small><div class="more"><code>buildBailoutMessage(nama,nominal,date) :326 → bailoutMessage.ts:84-124</code>: <code>AGENT_DISPLAY_NAMES :40-62</code>, H-1 <code>:95-97</code>, weekend/weekday <code>:108-123</code>, <code>formatIDCurrency :30-34</code> → collapse/copy (<code>:324-404, handleCopy :130</code>) / WA <code>web.whatsapp.com/send?text= :327</code> / CSV <code>kode;nama;nominal :36-42,141-144</code>. File batas: <code>fileValidation.ts:16,27</code>.</div></div></div>
+<div class="step"><div class="n">5</div><div><h4>Sisi DB (terpisah, read-only)</h4><small>Dashboard agregasi: count + sum nominal limit 5000</small><div class="more"><code>getDashboardStats() dashboardService.ts:58-113</code>: <code>exactCount(bailout) :81</code> + <code>select(nominal).limit(5000) :87-90</code> (<code>BAILOUT_SUM_LIMIT=5000 :27</code>, flag <code>bailoutCapped</code>) → <code>app/page.tsx:125,194-200</code>. Grep <code>from("bailout")</code> = 1 hit; tidak ada <code>insert/upsert/update</code> dari UI.</div></div></div>
+</div></div>
+<div class="card"><h2>📄 Parser &amp; redaksi</h2><div class="path">src/core/parsers/bailoutParser.ts · bailoutMessage.ts · src/app/bailout/page.tsx (1-424)</div><ul><li><b>Lib excel:</b> <code>src/lib/excel.ts</code> — <code>loadWorkbookFromBuffer, validateMatrixLimits, matrixToObjects, normalizeCellValue</code>; hanya <code>.xlsx/.xlsm</code> (OOXML ZIP); CSV parser RFC-4180 sendiri <code>:624</code></li><li><b>Contoh pesan:</b> Sunda-formal + nominal <code>Rp</code> + tanggal cetak H-1 dari tanggal redaksi yang bisa diubah</li><li><b>Implikasi arsitektur:</b> bailout aman (tanpa risiko tulis ganda) tetapi data tidak tersimpan — jika butuh histori, tambahkan <code>POST /api/bailout</code> → <code>upsert(kode_loket,periode)</code></li></ul><div class="kv"><span>sheet CA</span><span>paste TSV</span><span>WA link</span><span>CSV export</span><span>copy clipboard</span></div></div>
+</div>
+</section>
+
+<!-- OPS -->
+<section class="view" id="v-ops">
+<div class="card"><h2>🏭 Bagging · Fee-Rekap · Reconcile · Lookup · Auth</h2><p class="desc">Alur pendukung yang melengkapi waybill &amp; bailout.</p><table><thead><tr><th>Modul</th><th>Alur</th><th>File kunci</th></tr></thead><tbody>
+<tr><td><code>/bagging</code></td><td>Upload multi-Excel → <code>parseBaggingRowsFromAOA</code> (skor header) → <code>groupBaggingByAgen</code> → <code>lookupAgenByPpid</code> (no HP) → <code>buildBaggingMessage + WA url</code> (ref <code>BGG-xxxxxx</code>, salam acak). Tanpa insert resi otomatis.</td><td><code>baggingParser.ts · baggingMessage.ts · bagging/page.tsx:72-158</code></td></tr>
+<tr><td><code>/fee-rekap</code></td><td>Upload multi-sheet Master/BSB/Cari → <code>feeRekapService</code> parser 79 modul → import chunked → <code>loket_profiles + transaction_details</code> → slip PNG/clipboard → <code>verify / logs / lookup / drop-all (ADMIN)</code>. RPC summary + fallback.</td><td><code>feeRekapService.ts · api/fee-rekap/*.ts · fee-rekap/page.tsx</code></td></tr>
+<tr><td><code>/reconcile</code></td><td>Upload produk+resi → <code>reconcileHeader</code> (toleran judul/Inggris/baris kosong) → <code>validateReconcileRows</code> prefix EC3/PKH + duplikat → coverage PKH wajib P260+TTSPOS.</td><td><code>reconcileHeader.ts · reconcileValidator.ts · reconcile/page.tsx</code></td></tr>
+<tr><td><code>/data-utama + /lookup-agen</code></td><td>List/search/pagination/suggest/lookup/import Agen CUM → <code>mapAgenCumRowByIndex</code> + <code>dedupeByPpid</code> + <code>sanitizeRowForDb</code> → <code>upsert(ppid)</code> ADMIN-only. CLI <code>npm run db:import-agen</code>.</td><td><code>dataUtamaService.ts · agenCumMapper.ts · api/data-utama/* · scripts/importAgenCum.ts</code></td></tr>
+<tr><td><code>Auth / Admin</code></td><td><code>POST login</code> rate-limit 5/menit/IP → <code>authenticateUser(users)</code> → bcrypt/SHA-legacy + auto-rehash → JWT HS256 cookie → <code>proxy.ts</code> gate ADMIN → <code>/api/users</code> (toSafeUser, larang hapus diri) + import + hapus resi.</td><td><code>session.ts · password.ts · userService.ts · proxy.ts · api/auth/* · api/users/route.ts</code></td></tr>
+</tbody></table>
+<div class="okbox">✅ Rekomendasi Archify: (1) buat <code>src/app/logs/page.tsx</code> atau hapus dari <code>NAV_ITEMS</code>; (2) ekstrak <code>src/modules/*</code> dari page gemuk (fee-rekap terbesar); (3) pertimbangkan <code>POST /api/bailout</code> bila histori dibutuhkan; (4) aktifkan/hapus <code>zod/react-query</code> agar tak jadi dead-deps; (5) tambah bucket Storage hanya bila slip PNG perlu persisten (saat ini via <code>html-to-image</code> lokal).</div>
+</div>
+</section>
+
+<footer>KurLog Portal v2 · Diagram interaktif mandiri (tanpa dependensi eksternal — buka langsung di browser) · Dibuat 2026-10-13 dari pembacaan langsung repo · Waybill=tabel <code>resi</code> · Bailout=stateless · <span class="mono">archify-architecture.html</span></footer>
+</div>
+<script>
+var DATA={
+dashboard:{t:"/ — Dashboard (app/page.tsx)",p:"src/app/page.tsx + src/core/services/dashboardService.ts:6",b:["Server force-dynamic, stat cards + quick actions + QuickLookupBox lazy","getDashboardStats: exactCount + sum bailout limit 5000 (:58-113)","Memuja tabel resi + data_lengkap_utama + bailout"],g:["server","dashboard"]},
+resi:{t:"/monitoring-resi — Waybill UI",p:"src/app/monitoring-resi/page.tsx ⇄ src/app/api/resi/route.ts ⇄ resiService.ts",b:["Tab follow-up, filter tanggal, import copas chunk 200, bulk delete","PATCH auto-close regex delivered/diterima/retur","DELETE ADMIN-only chunk 500"],g:["waybill","persist"]},
+bailout:{t:"/bailout — Stateless WA drafter",p:"src/app/bailout/page.tsx + bailoutParser.ts + bailoutMessage.ts",b:["Sheet CA / paste TSV, skor header ≥3","Template Sunda-formal H-1, weekend vs weekday","CSV ; + link web.whatsapp.com/send?text=","Tanpa insert ke tabel bailout"],g:["bailout","stateless"]},
+bagging:{t:"/bagging — Grouping per agen",p:"src/app/bagging/page.tsx + baggingParser.ts + baggingMessage.ts",b:["Multi-Excel KurLog → groupBaggingByAgen","lookupAgenByPpid untuk no HP","Pesan WA ref BGG-xxxxxx"],g:["agen"]},
+fee:{t:"/fee-rekap — Modul terbesar",p:"src/app/fee-rekap/page.tsx + api/fee-rekap/* + feeRekapService.ts",b:["Multi-sheet Master/BSB/Cari, 79 modul, import chunked","loket_profiles + transaction_details","2 RPC summary + slip PNG via html-to-image"],g:["fee"]},
+etc:{t:"+5 pages",p:"login · data-utama · lookup-agen · reconcile · user-management",b:["/login: sanitasi redirect","/data-utama: paginasi 50 + import ADMIN","/reconcile: validator EC3/PKH","/user-management: ADMIN-only"],g:["ui"]},
+proxy:{t:"proxy.ts — Auth gate (Next 16)",p:"src/proxy.ts:17-56",b:["Redirect /login?redirect= bila tanpa sesi","Gate ADMIN /user-management|/admin*","Lolos /_next|/api|static (tanpa middleware.ts)"],g:["auth"]},
+auth:{t:"/api/auth/* — JWT custom",p:"src/app/api/auth/login|me|logout/route.ts + lib/session.ts + lib/password.ts",b:["Rate-limit 5/menit/IP","bcrypt + SHA-legacy auto-rehash","Cookie httpOnly cultflow_session (jose HS256)"],g:["auth"]},
+apiresi:{t:"/api/resi — Waybill API",p:"src/app/api/resi/route.ts (GET,POST,PATCH,DELETE)",b:["GET: validasi tanggal + purge fire-and-forget","POST: toCopasItem sanitize + regex tanggal","PATCH: SELESAI wajib catatan","DELETE: ADMIN + batas 2000"],g:["waybill","api"]},
+apidata:{t:"/api/data-utama* — Agen API",p:"src/app/api/data-utama/{route,lookup,suggest,import,regionals}",b:["List/search/pagination/suggest","Import upsert(ppid) ADMIN-only","resolveAllowedColumns + sanitizeRowForDb"],g:["agen","api"]},
+apifee:{t:"/api/fee-rekap* — Fee API",p:"src/app/api/fee-rekap/{route,import,lookup,logs,verify,drop-all}",b:["admin.rpc fee_rekap_summary + loket_profiles_summary","Fallback paginasi bila RPC belum migrasi","drop-all ADMIN"],g:["fee","api"]},
+parser:{t:"core/parsers — Murni (tanpa Next/Supabase)",p:"src/core/parsers/{baggingParser,baggingMessage,bailoutParser,bailoutMessage,agenCumMapper,reconcileHeader,reconcileValidator}.ts",b:["Deteksi header skor toleran","Normalisasi Rp, periode ISO, prefix produk","Generator pesan WA"],g:["parser"]},
+svcresi:{t:"resiService — Waybill logic",p:"src/core/services/resiService.ts",b:["CRUD + filter + import copas + follow-up + purge","Proteksi downgrade SUDAH_FOLLOWUP","appendHistoryLog entri baru di atas"],g:["waybill","service"]},
+svcdata:{t:"dataUtamaService — Agen logic",p:"src/core/services/dataUtamaService.ts",b:["List/search/suggest/lookup/import data_lengkap_utama","Mapping Excel Agen CUM","Pagination 50"],g:["agen","service"]},
+svcfee:{t:"feeRekapService — Fee logic",p:"src/core/services/feeRekapService.ts",b:["Parser multi-sheet Loket BSB/Cari","Slip + rincian 79 modul","Import chunked + lookup Master"],g:["fee","service"]},
+sess:{t:"lib/session + password + excel",p:"src/lib/session.ts · password.ts · excel.ts · fileValidation.ts · supabase/{server,client}.ts",b:["JWT create/verify, role case-insensitive","bcrypt + legacy detect","exceljs wrapper + magic-bytes + limit 5MB (15MB fee)"],g:["lib"]},
+t_resi:{t:"Tabel resi (waybill)",p:"supabase/migrations/20260921_init_schema.sql:106-118",b:["no_resi UNIQUE NOT NULL","agen, layanan, status_resi, status_fu, tgl_tiket, closed_at","Kolom live-only ditangani kondisional (20261008)"],g:["db","waybill"]},
+t_utama:{t:"Tabel data_lengkap_utama",p:"20260921:10-97 + 20260923_align_v2:19-153",b:["~95 kolom agen","UNIQUE(ppid) WHERE ppid<>''","Index trigram ppid/nama + btree regional"],g:["db","agen"]},
+t_bail:{t:"Tabel bailout (read-only dari UI)",p:"20260921:123-132 — UNIQUE(kode_loket,periode)",b:["kode_loket, nama_loket, periode:date, nominal:bigint","Hanya dibaca dashboard (1 hit from(bailout))","UI bailout tidak menulis"],g:["db","bailout"]},
+t_fee:{t:"Fee / loket_* + RPC",p:"20260924_fee_loket.sql · 20261002/003/007",b:["fee_loket, fee_upload_logs, loket_profiles, loket_transaction_details","2 RPC SECURITY DEFINER","Index trigram + komposit (periode,ppid)"],g:["db","fee"]},
+t_users:{t:"Tabel users",p:"20260921:137-144 + 20260923_rls_lockdown",b:["username UNIQUE, role ADMIN/USER","Password hash (bcrypt)","RLS: REVOKE anon/authenticated"],g:["db","auth"]}
+};
+function show(k){var d=DATA[k];if(!d)return;document.getElementById('dPath').textContent=d.p;document.getElementById('dBody').innerHTML='<ul>'+d.b.map(function(x){return '<li>'+x+'</li>'}).join('')+'</ul>';document.getElementById('dTags').innerHTML=d.g.map(function(x){return '<span>#'+x+'</span>'}).join('');
+document.querySelector('[data-v="overview"]').scrollIntoView({block:'nearest'});}
+document.querySelectorAll('.node').forEach(function(n){n.addEventListener('click',function(){show(n.getAttribute('data-k'))})});
+document.querySelectorAll('#tabs button').forEach(function(b){b.addEventListener('click',function(){document.querySelectorAll('#tabs button').forEach(function(x){x.classList.remove('active')});b.classList.add('active');document.querySelectorAll('.view').forEach(function(v){v.classList.remove('active')});document.getElementById('v-'+b.getAttribute('data-v')).classList.add('active');window.scrollTo({top:0,behavior:'smooth'})})});
+document.querySelectorAll('.step').forEach(function(s){s.addEventListener('click',function(){s.classList.toggle('open')})});
+function filt(qid,tid){var q=document.getElementById(qid);if(!q)return;q.addEventListener('input',function(){var v=q.value.toLowerCase();document.querySelectorAll('#'+tid+' tbody tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().indexOf(v)>-1?'':'none'})})}
+filt('qRoutes','tRoutes');filt('qTables','tTables');
+document.querySelectorAll('#tApi td code').forEach(function(c){c.style.cursor='copy';c.title='Klik untuk salin';c.addEventListener('click',function(e){e.stopPropagation();try{navigator.clipboard.writeText(c.textContent)}catch(_){}} )});
+</script>
+</body>
+</html>

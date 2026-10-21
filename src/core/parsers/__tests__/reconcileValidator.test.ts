@@ -3,6 +3,7 @@ import {
   buildReconcileBreakdown,
   countResiOccurrences,
   normalizeResi,
+  paginateReconcileRows,
   validateReconcileRows,
 } from "../reconcileValidator";
 
@@ -427,11 +428,28 @@ describe("validateReconcileRows — Rule 1b (DUPLICATE_RESI)", () => {
 
   it("resi kosong tidak dihitung sebagai duplikat", () => {
     const breakdown = buildReconcileBreakdown([
-      { index: 0, produk: "EC3", nomorResi: "", isValid: false },
-      { index: 1, produk: "EC3", nomorResi: "", isValid: false },
+      { index: 0, sourceRow: 2, produk: "EC3", nomorResi: "", isValid: false },
+      { index: 1, sourceRow: 3, produk: "EC3", nomorResi: "", isValid: false },
     ]);
     expect(breakdown.duplicateResiRows).toBe(0);
     expect(breakdown.duplicateResiGroups).toBe(0);
+  });
+
+  it("[H1] sourceRow diteruskan ke hasil validasi (baris asli berkas)", () => {
+    const result = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "P26001", sourceRow: 4 },
+      { produk: "PKH", nomor_resi: "SALAH1", sourceRow: 6 },
+      { produk: "PKH", nomor_resi: "P26002", sourceRow: 7 },
+    ]);
+    expect(result.rows.map((row) => row.sourceRow)).toEqual([4, 6, 7]);
+    // Baris invalid tetap membawa nomor baris aslinya.
+    expect(result.rows[1]?.isValid).toBe(false);
+    expect(result.rows[1]?.sourceRow).toBe(6);
+    // Fallback untuk pemanggil lama (tanpa sourceRow): index + 1.
+    const fallback = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "P26001" },
+    ]);
+    expect(fallback.rows[0]?.sourceRow).toBe(1);
   });
 
   it("tiga kemunculan = 1 grup, 3 baris", () => {
@@ -557,6 +575,51 @@ describe("layanan POS baru (3PE, 312, Q9, ...)", () => {
     expect(bad.rows.every((row) => row.code === "PREFIX_MISMATCH")).toBe(true);
   });
 
+  it("3LX menerima prefix 'LX' (resi LX...) selain '3LX'", () => {
+    // Resi berawalan "LX" (mis. LX123456789) sah untuk produk 3LX.
+    const ok = validateReconcileRows([
+      { produk: "3LX", nomor_resi: "LX123456789" },
+      { produk: "3LX", nomor_resi: "3LX001" },
+      { produk: "3LX", nomor_resi: "lx987654321" },
+    ]);
+    expect(ok.rows.every((row) => row.isValid)).toBe(true);
+    expect(
+      ok.rows.every((row) => row.code !== "PREFIX_MISMATCH")
+    ).toBe(true);
+    expect(
+      ok.rows.every((row) => row.code !== "UNKNOWN_OR_INVALID_PRODUCT")
+    ).toBe(true);
+    // Kanonik: produk dinormalisasi ke kode "3LX".
+    expect(ok.rows[0]?.produk).toBe("3LX");
+    // Cakupan berkas: 3LX dengan resi LX saja tetap lengkap.
+    expect(ok.fileIssues).toHaveLength(0);
+    expect(ok.isValid).toBe(true);
+  });
+
+  it("produk 'LX' (tanpa angka) dipetakan ke 3LX, bukan UNKNOWN", () => {
+    const res = validateReconcileRows([
+      { produk: "LX", nomor_resi: "LX123456789" },
+      { produk: "lx", nomor_resi: "LX987654321" },
+    ]);
+    expect(res.rows.every((row) => row.isValid)).toBe(true);
+    expect(
+      res.rows.every((row) => row.code !== "UNKNOWN_OR_INVALID_PRODUCT")
+    ).toBe(true);
+    // Dikelompokkan sebagai produk 3LX pada breakdown.
+    const breakdown = buildReconcileBreakdown(res.rows);
+    expect(breakdown.byProduct["3LX"]).toEqual({ valid: 2, invalid: 0 });
+    expect(breakdown.unknownInvalid).toBe(0);
+  });
+
+  it("prefix LX tidak menoleransi produk lain (3LP tetap hanya 3LP)", () => {
+    const bad = validateReconcileRows([
+      { produk: "3LP", nomor_resi: "LX123456789" },
+      { produk: "3LX", nomor_resi: "P26001" },
+    ]);
+    expect(bad.rows.every((row) => row.code === "PREFIX_MISMATCH")).toBe(true);
+    expect(bad.rows[0]?.reason).toBe("Resi 3LP harus diawali 3LP");
+  });
+
   it("cakupan berkas longgar: 1 resi valid cukup, semua-salah menagih 1 issue", () => {
     const ok = validateReconcileRows([
       { produk: "3PE", nomor_resi: "CC1" },
@@ -589,5 +652,70 @@ describe("layanan POS baru (3PE, 312, Q9, ...)", () => {
     expect(breakdown.byProduct["REG"]).toBeUndefined();
     expect(breakdown.unknownInvalid).toBe(1);
     expect(result.rows[3]?.code).toBe("UNKNOWN_OR_INVALID_PRODUCT");
+  });
+});
+
+describe("paginateReconcileRows (render bertahap — audit H2)", () => {
+  const rows = Array.from({ length: 20_500 }, (_, i) => ({ i }));
+
+  it("mengembalikan satu halaman baris, bukan seluruh data", () => {
+    const page = paginateReconcileRows(rows, 1, 100);
+    expect(page.rows).toHaveLength(100);
+    expect(page.rows[0]?.i).toBe(0);
+    expect(page.total).toBe(20_500);
+    expect(page.totalPages).toBe(205);
+    expect(page.page).toBe(1);
+    expect(page.rangeStart).toBe(1);
+    expect(page.rangeEnd).toBe(100);
+  });
+
+  it("halaman tengah & terakhir terhitung benar", () => {
+    const mid = paginateReconcileRows(rows, 100, 100);
+    expect(mid.rows).toHaveLength(100);
+    expect(mid.rows[0]?.i).toBe(9_900);
+    expect(mid.rangeStart).toBe(9_901);
+    expect(mid.rangeEnd).toBe(10_000);
+
+    const last = paginateReconcileRows(rows, 205, 100);
+    expect(last.rows).toHaveLength(100);
+    expect(last.rows[99]?.i).toBe(20_499);
+    expect(last.rangeStart).toBe(20_401);
+    expect(last.rangeEnd).toBe(20_500);
+  });
+
+  it("halaman di luar rentang dijepit (tak baris kosong)", () => {
+    const beyond = paginateReconcileRows(rows, 9999, 100);
+    expect(beyond.page).toBe(205);
+    expect(beyond.rows.length).toBeGreaterThan(0);
+
+    const before = paginateReconcileRows(rows, 0, 100);
+    expect(before.page).toBe(1);
+    expect(before.rows).toHaveLength(100);
+
+    const negative = paginateReconcileRows(rows, -5, 100);
+    expect(negative.page).toBe(1);
+  });
+
+  it("data kosong -> 1 halaman kosong tanpa rangeNgaco", () => {
+    const empty = paginateReconcileRows([], 1, 100);
+    expect(empty.rows).toHaveLength(0);
+    expect(empty.total).toBe(0);
+    expect(empty.totalPages).toBe(1);
+    expect(empty.rangeStart).toBe(0);
+    expect(empty.rangeEnd).toBe(0);
+  });
+
+  it("pageSize tak valid dinormalisasi (tak bagi nol / NaN)", () => {
+    const zero = paginateReconcileRows(rows, 1, 0);
+    expect(zero.pageSize).toBe(1);
+    expect(zero.rows).toHaveLength(1);
+    const nan = paginateReconcileRows(rows, 1, Number.NaN);
+    expect(nan.pageSize).toBe(1);
+  });
+
+  it("TOTAL tetap penuh walau hanya 1 halaman dirender (ringkasan akurat)", () => {
+    const page = paginateReconcileRows(rows, 2, 100);
+    expect(page.rows.length).toBeLessThan(page.total);
+    expect(page.total).toBe(20_500);
   });
 });

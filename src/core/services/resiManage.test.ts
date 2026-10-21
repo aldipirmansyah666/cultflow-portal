@@ -317,6 +317,28 @@ describe("isAutoCloseNote", () => {
     expect(isAutoCloseNote("return to sender")).toBe(false);
     expect(isAutoCloseNote("delivery tertunda")).toBe(false);
   });
+
+  it("TIDAK menutup bila ada kata negasi eksplisit (regresi HIGH-2)", () => {
+    expect(isAutoCloseNote("belum diterima")).toBe(false);
+    expect(isAutoCloseNote("Belum Diterima")).toBe(false);
+    expect(isAutoCloseNote("tidak diterima")).toBe(false);
+    expect(isAutoCloseNote("paket belum diterima")).toBe(false);
+    expect(isAutoCloseNote("resi belum diterima oleh penerima")).toBe(false);
+    expect(isAutoCloseNote("belum retur")).toBe(false);
+    expect(isAutoCloseNote("barang tidak diterima")).toBe(false);
+    expect(isAutoCloseNote("bukan paket diterima")).toBe(false);
+    expect(isAutoCloseNote("sedang diproses")).toBe(false);
+    expect(isAutoCloseNote("masih diproses")).toBe(false);
+    expect(isAutoCloseNote("menunggu konfirmasi")).toBe(false);
+    expect(isAutoCloseNote("tidak ada retur")).toBe(false);
+  });
+
+  it("tetap menutup untuk frasa penerimaan yang sah dan tegas", () => {
+    expect(isAutoCloseNote("sudah diterima")).toBe(true);
+    expect(isAutoCloseNote("Paket sudah diterima penerima")).toBe(true);
+    expect(isAutoCloseNote("delivered")).toBe(true);
+    expect(isAutoCloseNote("retur disetujui")).toBe(true);
+  });
 });
 
 describe("otomatisasi CLOSE dari catatan follow-up", () => {

@@ -170,6 +170,12 @@ export function findReconcileHeader(
 export interface ReconcileInputRow {
   produk: string;
   nomor_resi: string;
+  /**
+   * Nomor baris ASLI di berkas (1-based, baris header = 1). Dicatat saat
+   * ekstraksi agar laporan bisa menunjuk tepat ke baris Excel — indeks
+   * array bergeser karena header awal & baris kosong ikut dibuang.
+   */
+  sourceRow: number;
 }
 
 /**
@@ -199,7 +205,8 @@ export function extractReconcileInputRows(
     ) {
       continue;
     }
-    out.push({ produk, nomor_resi });
+    // `r` = indeks matriks 0-based → nomor baris Excel = r + 1.
+    out.push({ produk, nomor_resi, sourceRow: r + 1 });
   }
   return out;
 }
@@ -222,11 +229,13 @@ export function normalizeReconcileRowsFromObjects(
   const produkKey = keys[produkCol] ?? "";
   const resiKey = keys[resiCol] ?? "";
   const out: ReconcileInputRow[] = [];
-  for (const row of rows) {
+  // `rows[0]` berasal dari baris matriks ke-2 (baris pertama dipakai sebagai
+  // header) → baris Excel = indeks data + 2 (baris header = 1).
+  rows.forEach((row, i) => {
     const produk = cellText(row[produkKey]);
     const nomor_resi = cellText(row[resiKey]);
-    if (produk === "" && nomor_resi === "") continue;
-    out.push({ produk, nomor_resi });
-  }
+    if (produk === "" && nomor_resi === "") return;
+    out.push({ produk, nomor_resi, sourceRow: i + 2 });
+  });
   return out;
 }

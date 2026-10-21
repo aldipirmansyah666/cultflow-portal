@@ -114,10 +114,27 @@ describe("extractReconcileInputRows", () => {
     const header = findReconcileHeader(matrix);
     expect(header).not.toBeNull();
     expect(extractReconcileInputRows(matrix, header!)).toEqual([
-      { produk: "PKH", nomor_resi: "P26123" },
-      { produk: "EC3", nomor_resi: "" },
-      { produk: "PJB", nomor_resi: "26KOM7" },
+      { produk: "PKH", nomor_resi: "P26123", sourceRow: 2 },
+      { produk: "EC3", nomor_resi: "", sourceRow: 3 },
+      { produk: "PJB", nomor_resi: "26KOM7", sourceRow: 6 },
     ]);
+  });
+
+  it("[H1] sourceRow = baris ASLI di Excel (tidak bergeser dg header/kosong)", () => {
+    // Header di baris 3; baris 4 data; baris 5 KOSONG (dibuang); baris 6 data.
+    // Nomor baris hasil harus: 4 dan 6 (bukan 1 dan 2).
+    const matrix: unknown[][] = [
+      ["LAPORAN RESI", "", ""],
+      ["", "", ""],
+      ["Produk", "Keterangan", "Nomor Resi"],
+      ["PKH", "ok", "P26001"],
+      ["", "", ""],
+      ["EC3", "salah", "SHPE9"],
+    ];
+    const header = findReconcileHeader(matrix);
+    expect(header?.row).toBe(2);
+    const rows = extractReconcileInputRows(matrix, header!);
+    expect(rows.map((r) => r.sourceRow)).toEqual([4, 6]);
   });
 });
 describe("columnLetter", () => {
@@ -152,8 +169,9 @@ describe("porting proyek lama — alias NOMOR + fallback objek", () => {
       { PRODUK: "", "NOMOR RESI": "" },
     ]);
     expect(rows).toEqual([
-      { produk: "PKH", nomor_resi: "P26123" },
-      { produk: "EC3", nomor_resi: "SHPE1" },
+      // Fallback: baris pertama matriks = header → data mulai baris Excel 2.
+      { produk: "PKH", nomor_resi: "P26123", sourceRow: 2 },
+      { produk: "EC3", nomor_resi: "SHPE1", sourceRow: 3 },
     ]);
     expect(normalizeReconcileRowsFromObjects([])).toEqual([]);
     expect(normalizeReconcileRowsFromObjects([{ Foo: "x" }])).toEqual([]);

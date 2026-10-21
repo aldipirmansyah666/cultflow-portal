@@ -13,6 +13,11 @@
 export interface ReconcileInputRow {
   produk?: string;
   nomor_resi?: string;
+  /**
+   * Nomor baris ASLI di berkas (1-based). Opsional agar pemanggil lama
+   * (tanpa sumber baris) tetap jalan — bila kosong, dipakai index+1.
+   */
+  sourceRow?: number;
 }
 
 /** Kategori mesin tiap celah baris — untuk filter/agregasi di UI. */
@@ -23,6 +28,12 @@ export type ReconcileRowCode =
 
 export interface ReconcileRowResult {
   index: number;
+  /**
+   * Nomor baris ASLI di berkas Excel (1-based). Tidak bergeser dengan
+   * header awal atau baris kosong yang dibuang saat ekstraksi — dipakai
+   * UI agar user bisa langsung menuju sel yang bermasalah.
+   */
+  sourceRow: number;
   produk: string;
   nomorResi: string;
   isValid: boolean;
@@ -120,12 +131,37 @@ const PRODUCT_PREFIXES: Record<SupportedProduct, readonly string[]> = {
   "010": ["010"], // DEFAULT: konfirmasi ke data rekon
   "331": ["CP"], // Pos Paket Internasional (UPU S10 Colis, data rekon)
   "332": ["CP"], // Pos Paket Internasional (UPU S10 Colis, data rekon)
-  "3LX": ["3LX"], // DEFAULT: konfirmasi ke data rekon
+  // 3LX: resi berawalan "3LX" (format lama) ATAU "LX" (format rekon
+  // aktual, mis. LX123456789). Kedua-duanya sah untuk produk 3LX.
+  "3LX": ["3LX", "LX"],
   "3LP": ["3LP"], // DEFAULT: konfirmasi ke data rekon
 };
 
 function isSupportedProduct(value: string): value is SupportedProduct {
   return (SUPPORTED_PRODUCTS as readonly string[]).includes(value);
+}
+
+/**
+ * Alias nilai kolom Produk -> kode produk kanonik.
+ *
+ * Kolom produk pada file rekon kadang hanya memuat kode ringkas tanpa
+ * angka ("LX"), sementara kode produk kanoniknya adalah "3LX". Tanpa
+ * alias ini baris tersebut ditolak sebagai UNKNOWN_OR_INVALID_PRODUCT
+ * walaupun resinya sah ("LX123456789").
+ */
+const PRODUCT_ALIASES: Record<string, SupportedProduct> = {
+  LX: "3LX",
+};
+
+/**
+ * Kode produk kanonik dari nilai kolom Produk.
+ * Null bila produk kosong atau tak dikenal.
+ */
+function canonicalProduct(raw: unknown): SupportedProduct | null {
+  const norm = normalize(raw);
+  if (norm === "") return null;
+  if (isSupportedProduct(norm)) return norm;
+  return PRODUCT_ALIASES[norm] ?? null;
 }
 
 const NBSP_REGEX = /\u00A0/g;
@@ -180,16 +216,29 @@ const DUPLICATE_RESI_REASON =
   "DUPLICATE_RESI: nomor resi ganda dalam berkas";
 
 function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult {
-  const produk = normalize(row.produk);
+  // Nomor baris asli di berkas (bila pemanggil menyediakannya); fallback
+  // ke index+1 untuk pemanggil lama yang tak melacak posisi baris.
+  const sourceRow =
+    typeof row.sourceRow === "number" &&
+    Number.isInteger(row.sourceRow) &&
+    row.sourceRow > 0
+      ? row.sourceRow
+      : index + 1;
+  // Nilai produk di kolom file (setelah normalisasi) & kode kanoniknya.
+  // Alias mis. "LX" -> "3LX"; bila tak dikenal, produk tetap ditampilkan
+  // apa adanya (raw) agar user melihat isi sel aslinya.
+  const produkRaw = normalize(row.produk);
+  const produk = canonicalProduct(row.produk);
   const nomorResi = normalizeResi(row.nomor_resi);
 
-  if (!isSupportedProduct(produk)) {
+  if (produk === null) {
     return {
       index,
-      produk,
+      sourceRow,
+      produk: produkRaw,
       nomorResi,
       isValid: false,
-      reason: produk === "" ? `${UNKNOWN_PRODUCT_REASON} (produk kosong)` : UNKNOWN_PRODUCT_REASON,
+      reason: produkRaw === "" ? `${UNKNOWN_PRODUCT_REASON} (produk kosong)` : UNKNOWN_PRODUCT_REASON,
       code: "UNKNOWN_OR_INVALID_PRODUCT",
     };
   }
@@ -202,10 +251,10 @@ function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult 
         : accepted === SHARED_PREFIXES_PKH_PJB_PE
           ? `Resi ${produk} harus diawali ${formatPrefixList(SHARED_PREFIXES_PKH_PJB_PE)}`
           : `Resi ${produk} harus diawali ${[...accepted].join(" atau ")}`;
-    return { index, produk, nomorResi, isValid: false, reason, code: "PREFIX_MISMATCH" };
+    return { index, sourceRow, produk, nomorResi, isValid: false, reason, code: "PREFIX_MISMATCH" };
   }
 
-  return { index, produk, nomorResi, isValid: true };
+  return { index, sourceRow, produk, nomorResi, isValid: true };
 }
 
 /**
@@ -465,6 +514,52 @@ export function buildReconcileBreakdown(
     // byProduct di atas; tidak ada counter bernama khusus.
   }
   return breakdown;
+}
+
+/**
+ * Pagination murni untuk tabel hasil validasi (render bertahap).
+ *
+ * Hanya satu halaman baris yang dikembalikan untuk dirender — untuk
+ * berkas 20.000+ baris, merender semuanya (±100.000 node DOM) membuat
+ * browser freeze. Ringkasan total TIDAK boleh ikut terpotong: `total`
+ * selalu jumlah baris yang cocok filter (bukan jumlah baris di halaman).
+ */
+export interface ReconcilePageResult<T> {
+  /** Baris satu halaman (siap dirender). */
+  rows: T[];
+  /** Halaman efektif (sudah dijepit ke 1..totalPages). */
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  /** Total baris (seluruh data yang ter-filter). */
+  total: number;
+  /** Baris pertama halaman ini (1-based; 0 bila tak ada data). */
+  rangeStart: number;
+  /** Baris terakhir halaman ini (1-based). */
+  rangeEnd: number;
+}
+
+export function paginateReconcileRows<T>(
+  rows: T[],
+  page: number,
+  pageSize: number
+): ReconcilePageResult<T> {
+  const size = Math.max(1, Math.floor(pageSize) || 1);
+  const total = rows.length;
+  const totalPages = Math.max(1, Math.ceil(total / size));
+  const safePage = Math.min(
+    Math.max(1, Math.floor(page) || 1),
+    totalPages
+  );
+  return {
+    rows: rows.slice((safePage - 1) * size, safePage * size),
+    page: safePage,
+    pageSize: size,
+    totalPages,
+    total,
+    rangeStart: total === 0 ? 0 : (safePage - 1) * size + 1,
+    rangeEnd: Math.min(safePage * size, total),
+  };
 }
 
 /**

@@ -129,6 +129,75 @@ async function loadProfilesSummaryViaRpc(
 }
 
 /**
+ * Ringkasan Master per periode via RPC
+ * (`loket_profiles_summary_for_period()`, migration 20261009000000).
+ * Null bila RPC gagal / belum dimigrasi → pemanggil jatuh ke ringkasan
+ * global (status quo, tidak error).
+ */
+async function loadProfilesSummaryForPeriod(
+  admin: SupabaseClient,
+  periode: string
+): Promise<{ summary: FeeSummary } | null> {
+  const { data, error } = await admin.rpc("loket_profiles_summary_for_period", {
+    p_periode: periode,
+  });
+  if (error || data === null || typeof data !== "object") return null;
+  const s = data as {
+    periods?: unknown;
+    latestPeriode?: unknown;
+    totalLoket?: unknown;
+    totalTerbayarAktif?: unknown;
+  };
+  const periods = (Array.isArray(s.periods) ? s.periods : [])
+    .map((p) => String(p ?? ""))
+    .filter((p) => p !== "")
+    .sort((a, b) => b.localeCompare(a));
+  return {
+    summary: {
+      periods,
+      latestPeriode:
+        typeof s.latestPeriode === "string" ? s.latestPeriode : periode,
+      totalLoket: toSafeRupiah(s.totalLoket),
+      totalTerbayarAktif: toSafeRupiah(s.totalTerbayarAktif),
+    },
+  };
+}
+
+/**
+ * Ringkasan legacy per periode via RPC
+ * (`fee_rekap_summary_for_period()`, migration 20261009000000).
+ * Null bila RPC belum tersedia.
+ */
+async function loadSummaryForPeriod(
+  admin: SupabaseClient,
+  periode: string
+): Promise<{ summary: FeeSummary } | null> {
+  const { data, error } = await admin.rpc("fee_rekap_summary_for_period", {
+    p_periode: periode,
+  });
+  if (error || data === null || typeof data !== "object") return null;
+  const s = data as {
+    periods?: unknown;
+    latestPeriode?: unknown;
+    totalLoket?: unknown;
+    totalTerbayarAktif?: unknown;
+  };
+  const periods = (Array.isArray(s.periods) ? s.periods : [])
+    .map((p) => String(p ?? ""))
+    .filter((p) => p !== "")
+    .sort((a, b) => b.localeCompare(a));
+  return {
+    summary: {
+      periods,
+      latestPeriode:
+        typeof s.latestPeriode === "string" ? s.latestPeriode : periode,
+      totalLoket: toSafeRupiah(s.totalLoket),
+      totalTerbayarAktif: toSafeRupiah(s.totalTerbayarAktif),
+    },
+  };
+}
+
+/**
  * Fallback bila RPC belum tersedia: agregasi lengkap via paginasi
  * `.range()` (tanpa `.limit(5000)` yang memotong diam-diam).
  * Melempar error DB asli agar diklasifikasi pemanggil.
@@ -275,6 +344,8 @@ interface ProfilListResult {
   totalPages: number;
   truncated: boolean;
   summarySource: string;
+  /** "semua" = agregat seluruh periode; "periode" = sesuai filter aktif. */
+  summaryScope: "semua" | "periode";
   periods: string[];
   summary: { totalLoket: number; totalTerbayarAktif: number; latestPeriode: string };
 }
@@ -360,7 +431,13 @@ async function queryProfiles(
   // Ringkasan SELALU lengkap: agregasi SQL via RPC dulu (1 round-trip),
   // fallback paginasi penuh bila fungsi belum dimigrasi. Tidak ada lagi
   // full-table scan PostgREST di setiap request bila RPC tersedia.
-  const viaRpc = await loadProfilesSummaryViaRpc(admin);
+  // Bila filter periode aktif, ringkasan dihitung PER PERIODE (RPC
+  // `_for_period`) agar header sinkron dengan isi tabel.
+  const scoped =
+    q.periode !== "" && q.periode !== "SEMUA"
+      ? await loadProfilesSummaryForPeriod(admin, q.periode)
+      : null;
+  const viaRpc = scoped ?? (await loadProfilesSummaryViaRpc(admin));
   const summary = viaRpc ? viaRpc.summary : await summarizeProfiles(admin);
   return {
     // Baris mentah snake_case (angka bigint bisa string) — klien memetakan
@@ -372,6 +449,7 @@ async function queryProfiles(
     totalPages: Math.max(1, Math.ceil(total / q.pageSize)),
     truncated: from + rows.length < total,
     summarySource: "profiles",
+    summaryScope: scoped ? "periode" : "semua",
     periods: summary.periods,
     summary: {
       totalLoket: summary.totalLoket,
@@ -497,7 +575,12 @@ async function queryLegacy(
   // Ringkasan SELALU lengkap: agregasi SQL via RPC dulu, fallback
   // paginasi penuh bila fungsi belum dimigrasi. Tidak ada lagi
   // `.limit(5000)` + reduce JS yang terpotong diam-diam.
-  const viaRpc = await loadSummaryViaRpc(admin);
+  // Filter periode aktif → ringkasan per periode (RPC `_for_period`).
+  const scoped =
+    q.periode !== "" && q.periode !== "SEMUA"
+      ? await loadSummaryForPeriod(admin, q.periode)
+      : null;
+  const viaRpc = scoped ?? (await loadSummaryViaRpc(admin));
   let summary: FeeSummary;
   let summarySource: "rpc" | "fallback";
   if (viaRpc) {
@@ -526,6 +609,7 @@ async function queryLegacy(
       latestPeriode: summary.latestPeriode,
     },
     summarySource,
+    summaryScope: scoped ? "periode" : "semua",
   };
 }
 
