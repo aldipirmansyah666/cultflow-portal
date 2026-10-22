@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCariSlipText,
+  buildDetailedSlipText,
   buildFeeAgentProfile,
   buildFeeCsv,
   buildFeeSlipText,
@@ -8,6 +9,7 @@ import {
   buildFullModuleBreakdown,
   buildModuleBreakdown,
   buildRincianText,
+  buildSimpleSlipText,
   CARI_MODULE_MAP,
   classifyFeeDbError,
   computeTotalFee,
@@ -17,6 +19,7 @@ import {
   detectFeeHeader,
   dropAllFeeData,
   excelSerialToTanggal,
+  feeRowToSlipTextRow,
   isPaidStatus,
   LOKET_BSB_TARGET,
   displayNamaLoket,
@@ -40,6 +43,7 @@ import {
   selectFeeSheet,
   slipImageFilename,
   statusLabelCari,
+  toFeeSlipTextRow,
   toFeeRekapRowFromProfil,
   toLoketDetailDbRows,
   toLoketProfileDbRow,
@@ -2650,5 +2654,192 @@ describe("Tanggal Transfer ala E27 + nama file slip", () => {
       "slip-53JCUM03186MJKSM-2026-08.png"
     );
     expect(slipImageFilename("a/b c", "")).toBe("slip-a_b_c-loket.png");
+  });
+});
+
+describe("Salin slip: ringkasan vs slip lengkap + rincian modul", () => {
+  const master = {
+    ppid: "53JCUM03186MJKSM",
+    namaLoket: "Agen Barokah Cikampek",
+    bank: "BCA",
+    noRekening: "1234567890",
+    namaPemilik: "Budi Santoso",
+    rekomender: "",
+    elektrikArea: "",
+    periode: "2026-08",
+    feeBulanIni: 1250000,
+    feeBulanSebelumnya: 0,
+    subsidiAntarLoket: 0,
+    totalFee: 1250000,
+    minus: 0,
+    hold: 0,
+    potonganLainnya: 25000,
+    potonganOngkir: 50000,
+    totalFeeTransfer: 1175000,
+    feeKeDeposit: 0,
+    feeTransferRekening: 0,
+    sisaFee: 1175000,
+    keterangan: "Transfer 05 Agustus 2026",
+    tanggalTransfer: "5-Aug-2026",
+    feeSiapTransfer: 1175000,
+    statusPembayaran: "KE_DEPOSIT",
+  } as const;
+  const details = [
+    { modul: "PLN Postpaid", lembar: 120, feePerLembar: 2500, total: 300000 },
+    { modul: "BPJS TK", lembar: 210, feePerLembar: 1500, total: 315000 },
+  ];
+
+  it("buildSimpleSlipText: profil + total fee + status + keterangan, tanpa rincian modul", () => {
+    const text = buildSimpleSlipText(toFeeSlipTextRow(master));
+    expect(text).toContain("SLIP FEE LOKET/AGEN");
+    expect(text).toContain("53JCUM03186MJKSM");
+    expect(text).toContain("Agen Barokah Cikampek");
+    expect(text).toContain("Agustus 2026");
+    expect(text).toContain("Rp 1.250.000");
+    expect(text).toContain("Fee Ke Deposit");
+    expect(text).toContain("Transfer 05 Agustus 2026");
+    // TIDAK boleh memuat tabel rincian modul.
+    expect(text).not.toContain("RINCIAN TRANSAKSI");
+    expect(text).not.toContain("FEE/LEMBAR");
+    expect(text).not.toContain("PLN Postpaid");
+    // Field profil kosong tak dirender (tak ada baris kosong).
+    expect(text).not.toContain("Rekomender");
+    expect(text).not.toContain("Elektrik Area");
+  });
+
+  it("buildSimpleSlipText: field profil terisi ikut dirender", () => {
+    const text = buildSimpleSlipText({
+      ...toFeeSlipTextRow(master),
+      rekomender: "Siti Aminah",
+      elektrikArea: "CIKAMPEK",
+    });
+    expect(text).toContain("Rekomender       : Siti Aminah");
+    expect(text).toContain("Elektrik Area    : CIKAMPEK");
+  });
+
+  it("buildSimpleSlipText: kolom ':' rata-rata (aman untuk teks proporsional)", () => {
+    const text = buildSimpleSlipText(toFeeSlipTextRow(master));
+    const posisi = text
+      .split("\n")
+      .filter((l) => l.includes(" : "))
+      .map((l) => l.indexOf(" : "));
+    expect(posisi.length).toBeGreaterThan(5);
+    expect(new Set(posisi).size).toBe(1);
+  });
+
+  it("buildSimpleSlipText: angka rupiah bebas NBSP (tidak merusak perataan)", () => {
+    const text = buildSimpleSlipText(toFeeSlipTextRow(master));
+    expect(text).not.toContain("\u00a0");
+    expect(text).toContain("Total Fee        : Rp 1.250.000");
+  });
+
+  it("buildSimpleSlipText: field kosong tampil '-' (tak ada baris kosong)", () => {
+    const text = buildSimpleSlipText({
+      ppid: "",
+      namaLoket: "",
+      periode: "",
+      totalFee: 0,
+      status: "PENDING",
+      keterangan: "",
+    });
+    // Lebar label mengikuti label yang tampil (hanya label yang ada).
+    expect(text).toMatch(/^PPID\s+: -$/m);
+    expect(text).toMatch(/^Nama Loket\s+: -$/m);
+    expect(text).toMatch(/^Keterangan\s+: -$/m);
+    expect(text).toMatch(/^Status\s+: Pending$/m);
+    expect(text).toContain("Rp 0");
+  });
+
+  it("buildDetailedSlipText: ringkasan + tabel rincian modul + baris TOTAL", () => {
+    const text = buildDetailedSlipText(toFeeSlipTextRow(master), details);
+    // Bagian ringkasan tetap sama persis dengan opsi ringkas.
+    expect(text).toContain("53JCUM03186MJKSM");
+    expect(text).toContain("Rp 1.250.000");
+    // Tabel rincian.
+    expect(text).toContain("RINCIAN TRANSAKSI");
+    expect(text).toContain("MODUL");
+    expect(text).toContain("LEMBAR");
+    expect(text).toContain("FEE/LEMBAR");
+    expect(text).toContain("TOTAL FEE");
+    expect(text).toContain("PLN Postpaid");
+    expect(text).toContain("300.000");
+    // Baris TOTAL = jumlah lembar & jumlah fee modul.
+    expect(text).toContain("TOTAL");
+    expect(text).toContain("330");
+    expect(text).toContain("615.000");
+  });
+
+  it("buildDetailedSlipText: kolom angka rata kanan & lebar kolom = isi terpanjang", () => {
+    const text = buildDetailedSlipText(toFeeSlipTextRow(master), details);
+    const baris = text
+      .split("\n")
+      .filter((l) => l.startsWith("PLN Postpaid") || l.startsWith("BPJS TK"));
+    expect(baris).toHaveLength(2);
+    // Kolom TOTAL adalah kolom terakhir → ujung baris (setelah trimEnd)
+    // harus sama untuk semua baris (rata kanan).
+    expect(baris[0]!.trimEnd().length).toBe(baris[1]!.trimEnd().length);
+    // Kolom modul dimulai di indeks 0 dan lebarnya >= modul terpanjang.
+    expect(baris[0]!.indexOf("PLN Postpaid")).toBe(0);
+    expect(baris[1]!.indexOf("BPJS TK")).toBe(0);
+    const lebarModul = Math.max(
+      "MODUL".length,
+      ...details.map((d) => d.modul.length)
+    );
+    expect(baris[0]!.indexOf("120")).toBeGreaterThanOrEqual(lebarModul);
+  });
+
+  it("buildDetailedSlipText: rincian kosong -> penanda jelas, bukan teks kosong", () => {
+    const text = buildDetailedSlipText(toFeeSlipTextRow(master), []);
+    expect(text).toContain("RINCIAN TRANSAKSI");
+    expect(text).toContain("Belum ada rincian modul pada periode ini.");
+    expect(text).toContain("53JCUM03186MJKSM");
+  });
+
+  it("buildDetailedSlipText: selisih total rincian vs Total Fee dilaporkan", () => {
+    const text = buildDetailedSlipText(toFeeSlipTextRow(master), details);
+    // Σ modul = 615.000 vs Total Fee slip = 1.250.000 → selisih dilaporkan.
+    expect(text).toContain("Catatan:");
+    expect(text).toContain("615.000");
+    expect(text).toContain("1.250.000");
+    expect(text).toContain("selisih Rp 635.000");
+  });
+
+  it("buildDetailedSlipText: blok keuangan Master ikut (nilai non-nol + Fee Siap Transfer)", () => {
+    const text = buildDetailedSlipText(toFeeSlipTextRow(master), details);
+    expect(text).toContain("RINGKASAN KEUANGAN");
+    expect(text).toContain("Fee Bulan Ini");
+    expect(text).toContain("Potongan Ongkir");
+    expect(text).toContain("Total Fee di Transfer");
+    expect(text).toContain("Fee Siap Transfer");
+    // Nilai nol tidak di_menuangkan agar ringkas.
+    expect(text).not.toContain("Minus Loket");
+    expect(text).not.toContain("Fee di Tahan");
+  });
+
+  it("toFeeSlipTextRow: status kaya Master diteruskan apa adanya", () => {
+    const row = toFeeSlipTextRow(master);
+    expect(row.status).toBe("KE_DEPOSIT");
+    expect(row.totalFee).toBe(1250000);
+    expect(row.finansial?.feeSiapTransfer).toBe(1175000);
+  });
+
+  it("feeRowToSlipTextRow: baris legacy -> ringkasan tanpa blok keuangan", () => {
+    const row = feeRowToSlipTextRow({
+      id: "x",
+      ppid: "12BSPA19010BDLMH",
+      namaLoket: "",
+      periode: "2026-09",
+      totalFee: 975500,
+      status: "PENDING",
+      rincian: [],
+      updatedAt: "",
+    });
+    expect(row.namaLoket).toBe("12BSPA19010BDLMH"); // fallback PPID
+    expect(row.status).toBe("PENDING");
+    expect(row.finansial).toBeUndefined();
+    expect(row.keterangan).toBe("");
+    const text = buildDetailedSlipText(row, []);
+    expect(text).toContain("Rp 975.500");
+    expect(text).not.toContain("RINGKASAN KEUANGAN");
   });
 });

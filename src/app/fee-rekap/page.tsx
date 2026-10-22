@@ -12,7 +12,14 @@
  * Data fee & riwayat dibaca/disimpan via /api/fee-rekap (service_role).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
@@ -26,6 +33,7 @@ import {
   Download,
   FileSpreadsheet,
   FileUp,
+  FileText,
   History,
   Image as ImageIcon,
   Inbox,
@@ -91,6 +99,14 @@ import {
   validateFileSize,
 } from "@/lib/fileValidation";
 import { cn, copyTextToClipboard, downloadBlob } from "@/lib/utils";
+import {
+  clipboardImageBlockMessage,
+  copyPngToClipboard,
+  describeClipboardImageError,
+  detectClipboardImageBlock,
+  expandScrollableRegions,
+  renderNodeToPngBlob,
+} from "@/lib/clipboardImage";
 
 type TabKey = "monitoring" | "upload";
 
@@ -102,6 +118,26 @@ type TabKey = "monitoring" | "upload";
 const PAGE_SIZE = 50;
 const PREVIEW_LIMIT = 8;
 const SEARCH_DEBOUNCE_MS = 350;
+
+/**
+ * Sumber tombol salin-gambar — dipakai sebagai key state "Tersalin!"
+ * supaya tiap tombol punya status sendiri (tanpa cross-talk).
+ * - `card` / `modal`        → slip PENUH (grid 2 kolom + rincian modul)
+ * - `card-summary` / `modal-summary` → slip RINGKAS (profil + rekap fee)
+ */
+type ImageCopySource =
+  | "card"
+  | "card-summary"
+  | "modal"
+  | "modal-summary";
+
+/** Nama file PNG untuk slip ringkas (dibedakan dari slip penuh). */
+function summaryImageFilename(file: { ppid: string; periode: string }): string {
+  return slipImageFilename(file.ppid, file.periode).replace(
+    /\.png$/,
+    "-ringkas.png"
+  );
+}
 
 const BULAN_LIST = [
   "Januari",
@@ -222,6 +258,67 @@ function SlipRow({ label, value, mono = false }: { label: string; value: string;
 }
 
 /**
+ * Ringkasan slip loket (kolom kiri lembar `Cari`).
+ *
+ * Berisi field inti: PPID, Nama Loket, rekening, fee per periode,
+ * potongan, Total Fee di Transfer, Status Fee, sisa fee, keterangan,
+ * dan tanggal transfer — TANPA tabel rincian modul.
+ *
+ * Dipakai dua kali:
+ * 1. Kolom kiri grid slip `Cari` (tampilan di layar).
+ * 2. Target "Salin Slip Ringkas" (gambar ringkas) via `summaryRef`.
+ *
+ * Ref-nya dikirim sebagai prop karena grid slip dipakai BERTEBARAN
+ * (kartu hasil pencarian + modal Detail) — masing-masing butuh ref
+ * sendiri agar tidak tertukar.
+ */
+function CariSlipSummary({
+  profile,
+  summaryRef,
+}: {
+  profile: LoketLookupProfile;
+  summaryRef?: RefObject<HTMLDivElement | null>;
+}) {
+  return (
+    <div ref={summaryRef} className="slip-summary bg-white">
+      <dl className="px-4 py-3 sm:px-6">
+        <SlipRow label="PPID" value={profile.ppid} mono />
+        <SlipRow label="Nama Loket" value={profile.namaLoket} />
+        <SlipRow label="Nomor Rekening" value={profile.noRekening} mono />
+        <SlipRow label="Rekening BANK" value={profile.bank} />
+        <SlipRow label="Pemilik Rekening" value={profile.namaPemilik} />
+        <SlipRow label="Fee Bulan Ini" value={formatRupiah(profile.feeBulanIni)} />
+        <SlipRow label="Fee Bulan Sebelumnya" value={formatRupiah(profile.feeBulanSebelumnya)} />
+        <SlipRow label="Subsidi Antar Loket" value={formatRupiah(profile.subsidiAntarLoket)} />
+        <SlipRow label="Total Fee" value={formatRupiah(profile.totalFee)} />
+        <SlipRow label="Minus Loket" value={formatRupiah(profile.minus)} />
+        <SlipRow label="Fee di Tahan" value={formatRupiah(profile.hold)} />
+        <SlipRow label="Potongan Lainnya" value={formatRupiah(profile.potonganLainnya)} />
+        <SlipRow label="Potongan Ongkir" value={formatRupiah(profile.potonganOngkir)} />
+        <SlipRow label="Total Fee di Transfer" value={formatRupiah(profile.totalFeeTransfer)} />
+        <SlipRow label="Status Fee" value={statusLabelCari(profile.statusPembayaran)} />
+        <SlipRow label="Fee ke Deposit" value={formatRupiah(profile.feeKeDeposit)} />
+        <SlipRow label="Fee di Transfer ke Rek" value={formatRupiah(profile.feeTransferRekening)} />
+        <SlipRow label="Sisa Fee" value={formatRupiah(profile.sisaFee)} />
+        <SlipRow label="Keterangan" value={profile.keterangan} />
+        <SlipRow label="Tanggal Transfer" value={profile.tanggalTransfer} />
+      </dl>
+      {/* Kotak total Fee Siap Transfer di bagian bawah slip. */}
+      <div className="px-4 pb-4 sm:px-6">
+        <div className="rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-3 text-white shadow-md shadow-emerald-600/20">
+          <p className="text-[11px] font-bold tracking-widest uppercase opacity-90">
+            Fee Siap Transfer
+          </p>
+          <p className="mt-0.5 text-2xl font-extrabold tracking-tight break-words">
+            {formatRupiah(profile.feeSiapTransfer)}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Grid slip 2 kolom persis lembar `Cari` — dipakai ulang di kartu hasil
  * Monitoring DAN modal Detail (satu sumber tampilan, tanpa drift).
  * Kiri: 20 baris slip keuangan + kotak hijau Fee Siap Transfer.
@@ -231,10 +328,12 @@ function CariSlipGrid({
   profile,
   details,
   legacy,
+  summaryRef,
 }: {
   profile: LoketLookupProfile;
   details: TransactionBreakdown[];
   legacy: boolean;
+  summaryRef?: RefObject<HTMLDivElement | null>;
 }) {
   // Daftar penuh 79 modul katalog (urutan parser `Cari`): DB hanya
   // menyimpan modul beraktivitas, sisanya diisi nol di sini agar tabel
@@ -262,39 +361,7 @@ function CariSlipGrid({
     <div className="grid gap-0 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)]">
       {/* KIRI — Slip Keuangan & Profil Agen (C6:E27). */}
       <div className="border-b border-dashed border-slate-300 lg:border-r lg:border-b-0">
-        <dl className="px-4 py-3 sm:px-6">
-          <SlipRow label="PPID" value={profile.ppid} mono />
-          <SlipRow label="Nama Loket" value={profile.namaLoket} />
-          <SlipRow label="Nomor Rekening" value={profile.noRekening} mono />
-          <SlipRow label="Rekening BANK" value={profile.bank} />
-          <SlipRow label="Pemilik Rekening" value={profile.namaPemilik} />
-          <SlipRow label="Fee Bulan Ini" value={formatRupiah(profile.feeBulanIni)} />
-          <SlipRow label="Fee Bulan Sebelumnya" value={formatRupiah(profile.feeBulanSebelumnya)} />
-          <SlipRow label="Subsidi Antar Loket" value={formatRupiah(profile.subsidiAntarLoket)} />
-          <SlipRow label="Total Fee" value={formatRupiah(profile.totalFee)} />
-          <SlipRow label="Minus Loket" value={formatRupiah(profile.minus)} />
-          <SlipRow label="Fee di Tahan" value={formatRupiah(profile.hold)} />
-          <SlipRow label="Potongan Lainnya" value={formatRupiah(profile.potonganLainnya)} />
-          <SlipRow label="Potongan Ongkir" value={formatRupiah(profile.potonganOngkir)} />
-          <SlipRow label="Total Fee di Transfer" value={formatRupiah(profile.totalFeeTransfer)} />
-          <SlipRow label="Status Fee" value={statusLabelCari(profile.statusPembayaran)} />
-          <SlipRow label="Fee ke Deposit" value={formatRupiah(profile.feeKeDeposit)} />
-          <SlipRow label="Fee di Transfer ke Rek" value={formatRupiah(profile.feeTransferRekening)} />
-          <SlipRow label="Sisa Fee" value={formatRupiah(profile.sisaFee)} />
-          <SlipRow label="Keterangan" value={profile.keterangan} />
-          <SlipRow label="Tanggal Transfer" value={profile.tanggalTransfer} />
-        </dl>
-        {/* Kotak total Fee Siap Transfer di bagian bawah slip. */}
-        <div className="px-4 pb-4 sm:px-6">
-          <div className="rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-3 text-white shadow-md shadow-emerald-600/20">
-            <p className="text-[11px] font-bold tracking-widest uppercase opacity-90">
-              Fee Siap Transfer
-            </p>
-            <p className="mt-0.5 text-2xl font-extrabold tracking-tight break-words">
-              {formatRupiah(profile.feeSiapTransfer)}
-            </p>
-          </div>
-        </div>
+        <CariSlipSummary profile={profile} summaryRef={summaryRef} />
       </div>
       {/* KANAN — Tabel Rincian Transaksi per Modul (K-N). */}
       <div className="bg-slate-50/60 px-4 py-3 sm:px-6">
@@ -521,8 +588,15 @@ export default function FeeRekapPage() {
   // Area slip kartu hasil pencarian (di bawah header kartu) — dirender ke
   // PNG / disalin sebagai gambar dengan helper yang SAMA dengan modal.
   const cardSlipRef = useRef<HTMLDivElement>(null);
+  // Area RINGKASAN slip (kolom kiri `Cari`) — target "Salin Slip Ringkas":
+  // hanya profil + rekap fee, TANPA tabel rincian modul.
+  const cardSummaryRef = useRef<HTMLDivElement>(null);
+  const modalSummaryRef = useRef<HTMLDivElement>(null);
   const [imgBusy, setImgBusy] = useState<"png" | "copy" | null>(null);
   const [imgError, setImgError] = useState<string | null>(null);
+  // Umpan balik visual "Tersalin!" per tombol (tanpa cross-talk antar
+  // sumber: kartu hasil pencarian / modal Detail × slip penuh / ringkas).
+  const [imgCopied, setImgCopied] = useState<ImageCopySource | null>(null);
   const [bulan, setBulan] = useState(9);
   const [tahun, setTahun] = useState(2026);
   // Termin bulanan (0 = tanpa termin; 1-3 = T1/T2/T3). Termin menjadi
@@ -708,6 +782,7 @@ export default function FeeRekapPage() {
     setModalLoading(true);
     setImgBusy(null);
     setImgError(null);
+    setImgCopied(null);
   }
 
   // Lookup Master per query ter-commit: slip keuangan + rincian modul
@@ -900,17 +975,12 @@ export default function FeeRekapPage() {
     if (!node || !file || imgBusy) return;
     setImgBusy("png");
     setImgError(null);
+    // Kontainer scroll rincian dibentangkan agar PNG memuat SEMUA baris
+    // (bukan hanya 480px pertama) — dikembalikan di `finally`.
+    const restore = expandScrollableRegions(node);
     try {
-      const { toPng } = await import("html-to-image");
-      const dataUrl = await toPng(node, {
-        cacheBust: true,
-        pixelRatio: 2,
-        backgroundColor: "#ffffff",
-      });
-      const a = document.createElement("a");
-      a.href = dataUrl;
-      a.download = slipImageFilename(file.ppid, file.periode);
-      a.click();
+      const blob = await renderNodeToPngBlob(node, { pixelRatio: 2 });
+      downloadBlob(blob, slipImageFilename(file.ppid, file.periode));
       setToast("Slip tersimpan sebagai PNG.");
     } catch (err) {
       setImgError(
@@ -919,6 +989,7 @@ export default function FeeRekapPage() {
           : "Gagal membuat PNG di browser ini. Coba Cetak / PDF."
       );
     } finally {
+      restore();
       setImgBusy(null);
     }
   }
@@ -929,77 +1000,106 @@ export default function FeeRekapPage() {
 
   /**
    * Salin slip sebagai GAMBAR ke clipboard (image/png).
-   * Butuh ClipboardItem + izin clipboard (Chrome/Edge modern).
-   * Dipakai modal Detail DAN kartu hasil pencarian (node diteruskan
-   * pemanggil). Seluruh baris rincian dibentangkan dulu dari scroll
-   * 480px ke tinggi penuh agar hasil render mencakup semuanya dari
-   * atas sampai bawah — lalu dikembalikan di `finally` sehingga
-   * tampilan layar tidak berubah. Murni clipboard, tanpa file disk.
+   *
+   * Butuh `ClipboardItem` + clipboard-write (Chrome/Edge/Firefox modern,
+   * Safari via jalur Promise). Dipakai modal Detail DAN kartu hasil
+   * pencarian (node diteruskan pemanggil).
+   *
+   * `kind` menentukan target & tampilan gambar:
+   * - `"full"`    → slip penuh (grid 2 kolom + tabel rincian modul).
+   * - `"summary"` → slip RINGKAS (profil + rekap fee, tanpa rincian).
+   *
+   * Catatan Safari (WebKit bug #244812): `clipboard.write()` WAJIB
+   * dipanggil sinkron di dalam user gesture. Karena itu render PNG
+   * dijalankan sebagai Promise yang-creation-nya terjadi di dalam
+   * handler (bukan setelah `await`), lalu Blob-nya diserahkan ke
+   * `ClipboardItem` berupa Promise agar browser yang me-resolve-nya.
+   *
+   * Seluruh baris rincian dibentangkan dulu dari scroll 480px ke tinggi
+   * penuh agar hasil render mencakup semuanya dari atas sampai bawah —
+   * lalu dikembalikan di `finally` sehingga tampilan layar tidak berubah.
    */
-  async function copySlipNodeImage(node: HTMLElement | null) {
-    if (!node || imgBusy) return;
-    if (
-      typeof window.ClipboardItem === "undefined" ||
-      !navigator.clipboard?.write
-    ) {
-      setImgError(
-        "Browser ini tidak mendukung salin gambar. Gunakan Download PNG."
-      );
+  async function copySlipNodeImage(
+    node: HTMLElement | null,
+    file: { ppid: string; periode: string } | null = null,
+    source: ImageCopySource = "card",
+    kind: "full" | "summary" = "full"
+  ) {
+    if (imgBusy) return;
+    if (!node) {
+      // Slip belum ter-mount (mis. masih memuat lookup Master).
+      setImgError("Slip belum siap dirender. Tunggu data selesai dimuat lalu ulangi.");
+      return;
+    }
+    const blocked = detectClipboardImageBlock();
+    if (blocked) {
+      setImgError(clipboardImageBlockMessage(blocked));
       return;
     }
     setImgBusy("copy");
     setImgError(null);
+    setImgCopied(null);
     // Simpan gaya inline asal agar bisa dikembalikan persis.
-    const scrollers = Array.from(
-      node.querySelectorAll<HTMLElement>(".rincian-scroll")
-    );
-    const saved = scrollers.map((el) => ({
-      el,
-      maxHeight: el.style.maxHeight,
-      height: el.style.height,
-      overflow: el.style.overflow,
-    }));
+    const restore = expandScrollableRegions(node);
+    let blobPromise: Promise<Blob> | null = null;
     try {
-      // Bentangkan kontainer scroll internal (inline menimpa class
-      // Tailwind max-h-[480px]); tunggu satu frame agar layout final.
-      for (const el of scrollers) {
-        el.style.maxHeight = "none";
-        el.style.height = "auto";
-        el.style.overflow = "visible";
-      }
-      await new Promise<void>((resolve) => {
-        requestAnimationFrame(() => resolve());
-      });
-      const { toBlob } = await import("html-to-image");
-      const blob = await toBlob(node, {
-        cacheBust: true,
+      // Render dimulai (promise) — BELUM di-await, supaya panggilan
+      // clipboard.write() di bawah tetap berada di user gesture.
+      blobPromise = renderNodeToPngBlob(node, {
         pixelRatio: 2,
         backgroundColor: "#ffffff",
+        // Slip ringkas diberi margin putih agar rapi saat ditempel ke
+        // WhatsApp/Telegram/Excel (konten tetap ukuran aslinya).
+        ...(kind === "summary" ? { padding: 16 } : {}),
       });
-      if (!blob) throw new Error("render kosong");
-      await navigator.clipboard.write([
-        new window.ClipboardItem({ "image/png": blob }),
-      ]);
-      setToast("Gambar slip tersalin ke clipboard.");
-    } catch (err) {
-      setImgError(
-        err instanceof Error
-          ? `Gagal menyalin gambar: ${err.message}`
-          : "Gagal menyalin gambar. Gunakan Download PNG."
+      await copyPngToClipboard(blobPromise);
+      setImgCopied(source);
+      setTimeout(
+        () => setImgCopied((prev) => (prev === source ? null : prev)),
+        2000
       );
+      setToast(
+        kind === "summary"
+          ? "Gambar slip ringkas tersalin ke clipboard."
+          : "Gambar slip tersalin ke clipboard."
+      );
+    } catch (err) {
+      setImgError(describeClipboardImageError(err));
+      // Cadangan: simpan PNG-nya supaya user tetap bisa pakai gambarnya
+      // walau clipboard tidak tersedia (mis. Safari/Firefox lawas).
+      try {
+        const blob = await blobPromise;
+        if (blob && file) {
+          downloadBlob(
+            blob,
+            kind === "summary"
+              ? summaryImageFilename(file)
+              : slipImageFilename(file.ppid, file.periode)
+          );
+          setToast("Salin ke clipboard gagal — PNG diunduh sebagai cadangan.");
+        }
+      } catch {
+        /* render juga gagal — pesan error di atas sudah cukup */
+      }
     } finally {
       // Kembalikan scroll internal apa adanya, lalu lepas status sibuk.
-      for (const s of saved) {
-        s.el.style.maxHeight = s.maxHeight;
-        s.el.style.height = s.height;
-        s.el.style.overflow = s.overflow;
-      }
+      restore();
       setImgBusy(null);
     }
   }
 
   async function copySlipImage() {
-    await copySlipNodeImage(modalSlipRef.current);
+    await copySlipNodeImage(modalSlipRef.current, modalProfile, "modal");
+  }
+
+  /** Salin slip RINGKAS (profil + rekap fee, tanpa tabel rincian). */
+  async function copySlipSummaryImage() {
+    await copySlipNodeImage(
+      modalSummaryRef.current,
+      modalProfile,
+      "modal-summary",
+      "summary"
+    );
   }
 
   /**
@@ -1983,17 +2083,52 @@ export default function FeeRekapPage() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void copySlipNodeImage(cardSlipRef.current)}
+                    onClick={() => void copySlipNodeImage(cardSlipRef.current, cardSlipFile, "card")}
                     disabled={imgBusy !== null}
                     title="Salin slip sebagai gambar ke clipboard"
+                    aria-live="polite"
                     className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
                   >
                     {imgBusy === "copy" ? (
                       <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : imgCopied === "card" ? (
+                      <Check className="size-3.5" aria-hidden />
                     ) : (
                       <ImageIcon className="size-3.5" aria-hidden />
                     )}
-                    {imgBusy === "copy" ? "Menyalin…" : "Salin Gambar"}
+                    {imgBusy === "copy"
+                      ? "Menyalin…"
+                      : imgCopied === "card"
+                        ? "Tersalin!"
+                        : "Salin Gambar"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void copySlipNodeImage(
+                        cardSummaryRef.current,
+                        cardSlipFile,
+                        "card-summary",
+                        "summary"
+                      )
+                    }
+                    disabled={imgBusy !== null}
+                    title="Salin slip ringkas (profil + rekap fee, tanpa tabel rincian) ke clipboard"
+                    aria-live="polite"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                  >
+                    {imgBusy === "copy" ? (
+                      <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    ) : imgCopied === "card-summary" ? (
+                      <Check className="size-3.5 text-emerald-600" aria-hidden />
+                    ) : (
+                      <FileText className="size-3.5" aria-hidden />
+                    )}
+                    {imgBusy === "copy"
+                      ? "Menyalin…"
+                      : imgCopied === "card-summary"
+                        ? "Tersalin!"
+                        : "Salin Slip Ringkas"}
                   </button>
                   <button
                     type="button"
@@ -2022,6 +2157,7 @@ export default function FeeRekapPage() {
                   profile={lookupProfile}
                   details={lookupDetails}
                   legacy={lookupLegacy}
+                  summaryRef={cardSummaryRef}
                 />
               ) : (
                 <>
@@ -2031,25 +2167,29 @@ export default function FeeRekapPage() {
                       Rincian Master tak termuat ({lookupError}) — menampilkan ringkasan fee.
                     </p>
                   )}
-                  <dl className="px-4 py-3 sm:px-6">
-                    <SlipRow label="PPID" value={agentProfile.ppid} mono />
-                    <SlipRow label="Nama Loket / Agen" value={agentProfile.namaLoket} />
-                    <SlipRow
-                      label="Periode"
-                      value={
-                        agentProfile.periods.length === 0
-                          ? "—"
-                          : agentProfile.periods.length === 1
-                            ? formatPeriode(agentProfile.periods[0] ?? "")
-                            : `Semua (${agentProfile.periods.length} periode)`
-                      }
-                    />
-                    <SlipRow
-                      label="Status Pembayaran"
-                      value={agentProfile.status === "TERBAYAR" ? "Terbayar" : "Pending"}
-                    />
-                    <SlipRow label="Total Fee" value={formatRupiah(agentProfile.totalFee)} />
-                  </dl>
+                  {/* Ringkasan virtual (tanpa Master) — tetap bisa disalin
+                      sebagai gambar ringkas lewat `cardSummaryRef`. */}
+                  <div ref={cardSummaryRef} className="bg-white">
+                    <dl className="px-4 py-3 sm:px-6">
+                      <SlipRow label="PPID" value={agentProfile.ppid} mono />
+                      <SlipRow label="Nama Loket / Agen" value={agentProfile.namaLoket} />
+                      <SlipRow
+                        label="Periode"
+                        value={
+                          agentProfile.periods.length === 0
+                            ? "—"
+                            : agentProfile.periods.length === 1
+                              ? formatPeriode(agentProfile.periods[0] ?? "")
+                              : `Semua (${agentProfile.periods.length} periode)`
+                        }
+                      />
+                      <SlipRow
+                        label="Status Pembayaran"
+                        value={agentProfile.status === "TERBAYAR" ? "Terbayar" : "Pending"}
+                      />
+                      <SlipRow label="Total Fee" value={formatRupiah(agentProfile.totalFee)} />
+                    </dl>
+                  </div>
                   <div aria-hidden className="border-t border-dashed border-slate-400" />
                   {/* Rincian Fee per periode untuk PPID ini */}
                   <div className="bg-slate-50/60 px-4 py-3 sm:px-6">
@@ -2998,21 +3138,6 @@ export default function FeeRekapPage() {
                   <span className="ml-auto flex flex-wrap gap-2 print:hidden">
                     <button
                       type="button"
-                      onClick={() => void copyText(buildCariSlipText(modalProfile, modalDetails))}
-                      className={cn(
-                        "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold text-white",
-                        copied ? "bg-emerald-600" : "bg-slate-900 hover:opacity-90"
-                      )}
-                    >
-                      {copied ? (
-                        <Check className="size-3.5" aria-hidden />
-                      ) : (
-                        <Copy className="size-3.5" aria-hidden />
-                      )}
-                      {copied ? "Tersalin!" : "Salin Slip"}
-                    </button>
-                    <button
-                      type="button"
                       onClick={() => void downloadSlipPng()}
                       disabled={imgBusy !== null}
                       title="Unduh slip sebagai gambar PNG"
@@ -3030,14 +3155,42 @@ export default function FeeRekapPage() {
                       onClick={() => void copySlipImage()}
                       disabled={imgBusy !== null}
                       title="Salin slip sebagai gambar ke clipboard"
+                      aria-live="polite"
                       className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
                     >
                       {imgBusy === "copy" ? (
                         <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                      ) : imgCopied === "modal" ? (
+                        <Check className="size-3.5" aria-hidden />
                       ) : (
                         <ImageIcon className="size-3.5" aria-hidden />
                       )}
-                      {imgBusy === "copy" ? "Menyalin…" : "Salin Gambar"}
+                      {imgBusy === "copy"
+                        ? "Menyalin…"
+                        : imgCopied === "modal"
+                          ? "Tersalin!"
+                          : "Salin Gambar"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void copySlipSummaryImage()}
+                      disabled={imgBusy !== null}
+                      title="Salin slip ringkas (profil + rekap fee, tanpa tabel rincian) ke clipboard"
+                      aria-live="polite"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+                    >
+                      {imgBusy === "copy" ? (
+                        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                      ) : imgCopied === "modal-summary" ? (
+                        <Check className="size-3.5 text-emerald-600" aria-hidden />
+                      ) : (
+                        <FileText className="size-3.5" aria-hidden />
+                      )}
+                      {imgBusy === "copy"
+                        ? "Menyalin…"
+                        : imgCopied === "modal-summary"
+                          ? "Tersalin!"
+                          : "Salin Slip Ringkas"}
                     </button>
                     <button
                       type="button"
@@ -3067,6 +3220,7 @@ export default function FeeRekapPage() {
                     profile={modalProfile}
                     details={modalDetails}
                     legacy={modalLegacy}
+                    summaryRef={modalSummaryRef}
                   />
                 </div>
                 <p className="border-t border-slate-100 px-4 py-2.5 font-mono text-[11px] text-slate-400 sm:px-6">
@@ -3130,7 +3284,7 @@ export default function FeeRekapPage() {
                       {formatRupiah(liveSelected.totalFee)}
                     </span>
                   </div>
-                  <div className="mt-1 flex gap-2">
+                  <div className="mt-1 flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => void copyText(buildFeeSlipText({ ...liveSelected, namaLoket: displayNamaLoket(liveSelected) }))}

@@ -4128,6 +4128,288 @@ export function buildCariSlipText(  profile: LoketLookupProfile,
   ].join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Slip text — ringkasan vs rincian lengkap (siap tempel ke WA / teks biasa)
+// ---------------------------------------------------------------------------
+
+/**
+ * Blok keuangan opsional pada slip Master (E11..E27 sheet `Cari`).
+ * Diisi `toFeeSlipTextRow` bila slip Master tersedia; kosong untuk data
+ * legacy (hanya fee_loket) sehingga teks ringkas tetap bisa dihasilkan.
+ */
+export interface FeeSlipTextFinansial {
+  feeBulanIni?: number;
+  feeBulanSebelumnya?: number;
+  subsidiAntarLoket?: number;
+  minus?: number;
+  hold?: number;
+  potonganLainnya?: number;
+  potonganOngkir?: number;
+  totalFeeTransfer?: number;
+  feeKeDeposit?: number;
+  feeTransferRekening?: number;
+  sisaFee?: number;
+  feeSiapTransfer?: number;
+  tanggalTransfer?: string;
+}
+
+/**
+ * Baris slip ringkas sebagai input pembentuk teks.
+ *
+ * Sengaja TIDAK memakai `LoketLookupProfile`/`FeeRekapRow` langsung agar
+ * format teks identik untuk data Master maupun data legacy, dan agar
+ * fungsi tetap murni (easy diuji).
+ */
+export interface FeeSlipTextRow {
+  ppid: string;
+  namaLoket: string;
+  periode: string;
+  /** TOTAL FEE (GROSS) periode. */
+  totalFee: number;
+  /** Status: "TERBAYAR"/"PENDING" (legacy) atau status kaya Master. */
+  status: string;
+  /** Keterangan (kolom KET / E26). */
+  keterangan?: string;
+  /** Bank — hanya dirender bila tersedia. */
+  bank?: string;
+  /** Nomor rekening — hanya dirender bila tersedia. */
+  noRekening?: string;
+  /** Nama pemilik rekening — hanya dirender bila tersedia. */
+  namaPemilik?: string;
+  /** Rekomender — hanya dirender bila tersedia. */
+  rekomender?: string;
+  /** Elektrik area — hanya dirender bila tersedia. */
+  elektrikArea?: string;
+  /** Blok keuangan lengkap — hanya dipakai slip DETAIL. */
+  finansial?: FeeSlipTextFinansial;
+}
+
+/** Garis pemisah slip (ASCII, aman di semua font/terminal). */
+const SLIP_RULE = "------------------------------";
+
+/**
+ * Rupiah untuk teks salin: `formatRupiah` menyisipkan NBSP (U+00A0)
+ * antara "Rp" dan angka — karakter tak kasatmata yang merusak perataan
+ * kolom saat dipindah ke WhatsApp/spreadsheet. Diganti spasi biasa.
+ */
+function slipRupiah(n: number): string {
+  return formatRupiah(n).replace(/\u00a0/g, " ");
+}
+
+/**
+ * Angka polos untuk kolom tabel (tanpa "Rp", tanpa NBSP) — titik ribuan
+ * gaya Indonesia. Dipakai agar kolom rata kanan benar-benar sejajar.
+ */
+function slipAngka(n: number): string {
+  return formatNumber(n);
+}
+
+/** Satu baris "Label : Value" dengan label dirata-ratakan. */
+function slipBaris(label: string, value: string, lebarLabel: number): string {
+  return `${label.padEnd(lebarLabel)} : ${value}`;
+}
+
+/**
+ * Adaptor slip Master → baris teks ringkas.
+ * Memakai status kaya Master (KE_DEPOSIT/BELUM_TRANSFER/...) agar label
+ * status pada teks sama persis dengan slip di layar.
+ */
+export function toFeeSlipTextRow(profile: LoketLookupProfile): FeeSlipTextRow {
+  return {
+    ppid: profile.ppid,
+    namaLoket: profile.namaLoket,
+    periode: profile.periode,
+    totalFee: profile.totalFee,
+    status: profile.statusPembayaran,
+    keterangan: profile.keterangan,
+    bank: profile.bank,
+    noRekening: profile.noRekening,
+    namaPemilik: profile.namaPemilik,
+    rekomender: profile.rekomender,
+    elektrikArea: profile.elektrikArea,
+    finansial: {
+      feeBulanIni: profile.feeBulanIni,
+      feeBulanSebelumnya: profile.feeBulanSebelumnya,
+      subsidiAntarLoket: profile.subsidiAntarLoket,
+      minus: profile.minus,
+      hold: profile.hold,
+      potonganLainnya: profile.potonganLainnya,
+      potonganOngkir: profile.potonganOngkir,
+      totalFeeTransfer: profile.totalFeeTransfer,
+      feeKeDeposit: profile.feeKeDeposit,
+      feeTransferRekening: profile.feeTransferRekening,
+      sisaFee: profile.sisaFee,
+      feeSiapTransfer: profile.feeSiapTransfer,
+      tanggalTransfer: profile.tanggalTransfer,
+    },
+  };
+}
+
+/**
+ * Adaptor baris monitoring (legacy `fee_loket`) → baris teks ringkas.
+ * Keterangan diambil dari profil Master bila baris ini menyimpannya.
+ */
+export function feeRowToSlipTextRow(row: FeeRekapRow): FeeSlipTextRow {
+  return {
+    ppid: row.ppid,
+    namaLoket: displayNamaLoket(row),
+    periode: row.periode,
+    totalFee: row.totalFee,
+    status: row.status,
+    keterangan: row.profil?.keterangan ?? "",
+  };
+}
+
+/**
+ * Teks slip RINGKAS — profil loket + total fee + status + keterangan.
+ * Tanpa tabel rincian modul (untuk pesan singkat ke WhatsApp).
+ *
+ * Format: label dirata-ratakan, nilai di baris yang sama agar mudah
+ * dibaca di aplikasi teks proporsional (bukan hanya monospace).
+ */
+export function buildSimpleSlipText(row: FeeSlipTextRow): string {
+  const items: [string, string][] = [];
+  items.push(["PPID", row.ppid.trim() === "" ? "-" : row.ppid]);
+  items.push([
+    "Nama Loket",
+    row.namaLoket.trim() === "" ? "-" : row.namaLoket,
+  ]);
+  if ((row.bank ?? "").trim() !== "") items.push(["Bank", (row.bank ?? "").trim()]);
+  if ((row.noRekening ?? "").trim() !== "") {
+    items.push(["No. Rekening", (row.noRekening ?? "").trim()]);
+  }
+  if ((row.namaPemilik ?? "").trim() !== "") {
+    items.push(["Pemilik Rekening", (row.namaPemilik ?? "").trim()]);
+  }
+  if ((row.rekomender ?? "").trim() !== "") {
+    items.push(["Rekomender", (row.rekomender ?? "").trim()]);
+  }
+  if ((row.elektrikArea ?? "").trim() !== "") {
+    items.push(["Elektrik Area", (row.elektrikArea ?? "").trim()]);
+  }
+  items.push([
+    "Periode",
+    row.periode.trim() === "" ? "-" : formatPeriode(row.periode),
+  ]);
+  items.push(["Total Fee", slipRupiah(row.totalFee)]);
+  items.push(["Status", statusLabelCari(row.status)]);
+  items.push(["Keterangan", (row.keterangan ?? "").trim() === "" ? "-" : (row.keterangan ?? "").trim()]);
+
+  const lebarLabel = Math.max(...items.map(([label]) => label.length));
+  return [
+    "SLIP FEE LOKET/AGEN",
+    SLIP_RULE,
+    ...items.map(([label, value]) => slipBaris(label, value, lebarLabel)),
+  ].join("\n");
+}
+
+/**
+ * Teks slip LENGKAP — ringkasan + tabel rincian transaksi per modul
+ * (nama modul, jumlah lembar, fee per lembar, total fee).
+ *
+ * dipakai bersama `buildSimpleSlipText` sehingga dua opsi salin punya
+ * satu sumber kebenaran untuk bagian ringkasan. Bila `details` kosong,
+ * tetap menghasilkan ringkasan + penanda "belum ada rincian modul"
+ * (data legacy) alih-alih teks kosong.
+ */
+export function buildDetailedSlipText(
+  row: FeeSlipTextRow,
+  details: TransactionBreakdown[]
+): string {
+  const blocks: string[] = [buildSimpleSlipText(row)];
+
+  // Blok keuangan lengkap (hanya bila slip Master tersedia).
+  const f = row.finansial;
+  if (f) {
+    const items: [string, string][] = [];
+    const push = (label: string, value: number | undefined, always = false) => {
+      if (value === undefined) return;
+      if (value === 0 && !always) return;
+      items.push([label, slipRupiah(value)]);
+    };
+    push("Fee Bulan Ini", f.feeBulanIni);
+    push("Fee Bulan Sebelumnya", f.feeBulanSebelumnya);
+    push("Subsidi Antar Loket", f.subsidiAntarLoket);
+    push("Minus Loket", f.minus);
+    push("Fee di Tahan", f.hold);
+    push("Potongan Lainnya", f.potonganLainnya);
+    push("Potongan Ongkir", f.potonganOngkir);
+    push("Total Fee di Transfer", f.totalFeeTransfer);
+    push("Fee ke Deposit", f.feeKeDeposit);
+    push("Fee di Transfer ke Rek", f.feeTransferRekening);
+    push("Sisa Fee", f.sisaFee);
+    push("Fee Siap Transfer", f.feeSiapTransfer, true);
+    if ((f.tanggalTransfer ?? "").trim() !== "") {
+      items.push(["Tanggal Transfer", (f.tanggalTransfer ?? "").trim()]);
+    }
+    if (items.length > 0) {
+      const lebarLabel = Math.max(...items.map(([label]) => label.length));
+      blocks.push(
+        [
+          "RINGKASAN KEUANGAN",
+          SLIP_RULE,
+          ...items.map(([label, value]) => slipBaris(label, value, lebarLabel)),
+        ].join("\n")
+      );
+    }
+  }
+
+  // Tabel rincian modul — kolom dirata-ratakan (kiri untuk modul,
+  // kanan untuk angka) agar rapi di aplikasi teks.
+  const head = ["MODUL", "LEMBAR", "FEE/LEMBAR", "TOTAL FEE"] as const;
+  const baris = details.map((d) => [
+    d.modul,
+    slipAngka(d.lembar),
+    slipAngka(d.feePerLembar),
+    slipAngka(d.total),
+  ]);
+  if (baris.length === 0) {
+    blocks.push(
+      ["RINCIAN TRANSAKSI", SLIP_RULE, "Belum ada rincian modul pada periode ini."].join(
+        "\n"
+      )
+    );
+    return blocks.join("\n\n");
+  }
+  const lebar = [0, 1, 2, 3].map((i) =>
+    Math.max(head[i]!.length, ...baris.map((c) => c[i]!.length))
+  );
+  const garis = (cells: readonly string[]): string =>
+    `${cells[0]!.padEnd(lebar[0]!)}  ${cells[1]!.padStart(lebar[1]!)}  ${cells[2]!.padStart(lebar[2]!)}  ${cells[3]!.padStart(lebar[3]!)}`;
+  const totalLembar = details.reduce((s, d) => s + d.lembar, 0);
+  const totalFee = details.reduce((s, d) => s + d.total, 0);
+  const garisTotal = garis([
+    "TOTAL",
+    slipAngka(totalLembar),
+    "",
+    slipAngka(totalFee),
+  ]);
+  const pemisah = "-".repeat(
+    Math.max(lebar[0]! + lebar[1]! + lebar[2]! + lebar[3]! + 6, 40)
+  );
+  blocks.push(
+    [
+      "RINCIAN TRANSAKSI",
+      pemisah,
+      garis(head),
+      ...baris.map(garis),
+      pemisah,
+      garisTotal,
+    ].join("\n")
+  );
+  // Selisih antara total rincian modul dan TOTAL FEE slip (bisa terjadi
+  // bila fee_per_lembar hasil turunan tak habis dibagi) — dilaporkan agar
+  // tak hilang diam-diam saat slip dikirim ke agen.
+  if (row.totalFee !== totalFee) {
+    const selisih = Math.abs(row.totalFee - totalFee);
+    blocks.push(
+      `Catatan: total rincian modul ${slipRupiah(totalFee)} berbeda dari ` +
+        `Total Fee slip ${slipRupiah(row.totalFee)} (selisih ${slipRupiah(selisih)}).`
+    );
+  }
+  return blocks.join("\n\n");
+}
+
 /**
  * Nama file unduhan slip PNG: `slip-{PPID}-{periode}.png`.
  * Disanitasi ke `[A-Za-z0-9_-]` agar aman di semua OS/browser.
