@@ -202,6 +202,39 @@ export async function listStoredPrefixSuggestions(
     .map(mapRow);
 }
 
+export interface PendingPrefixSuggestionsResult {
+  pendingCount: number;
+  suggestions: StoredPrefixSuggestion[];
+}
+
+/**
+ * Daftar usulan pending untuk badge & panel admin. `pendingCount` adalah
+ * total sebenarnya (bisa lebih besar dari item yang dikembalikan limit).
+ */
+export async function listPendingPrefixSuggestions(
+  client: SupabaseClient,
+  limit = 10
+): Promise<PendingPrefixSuggestionsResult> {
+  const safeLimit = Math.min(Math.max(Math.floor(limit) || 10, 1), 50);
+  const { data, error, count } = await client
+    .from("product_prefix_suggestions")
+    .select(PREFIX_COLUMNS, { count: "exact" })
+    .eq("status", "pending")
+    .order("updated_at", { ascending: false })
+    .order("occurrence_count", { ascending: false })
+    .limit(safeLimit);
+
+  if (error) {
+    throw new Error(`Gagal membaca usulan prefix pending: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as PrefixSuggestionRow[];
+  return {
+    pendingCount: typeof count === "number" ? count : rows.length,
+    suggestions: rows.map(mapRow),
+  };
+}
+
 /**
  * Ubah status satu usulan dan sinkronkan master prefix dalam satu transaksi
  * database. Null bila baris usulan tidak ditemukan.

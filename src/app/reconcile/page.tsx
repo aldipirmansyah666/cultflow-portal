@@ -33,6 +33,11 @@ import {
 } from "@/lib/fileValidation";
 import type { StoredPrefixSuggestion } from "@/core/services/prefixSuggestionService";
 import type { ProductPrefixMap } from "@/core/services/productPrefixService";
+import {
+  emitPrefixSuggestionsChanged,
+  PREFIX_SUGGESTIONS_CHANGED_EVENT,
+  type PrefixSuggestionsChangedDetail,
+} from "@/lib/reconcileEvents";
 import { cn } from "@/lib/utils";
 
 /**
@@ -49,6 +54,26 @@ function prefixSuggestionKey(
   suggestedPrefix: string
 ): string {
   return `${productName}::${suggestedPrefix}`;
+}
+
+/** Terapkan hasil keputusan admin ke map prefix yang dipakai validator. */
+function withSuggestionPrefixApplied(
+  current: ProductPrefixMap,
+  updated: StoredPrefixSuggestion
+): ProductPrefixMap {
+  const productName = updated.productName.trim().toUpperCase();
+  const prefix = updated.suggestedPrefix.trim().toUpperCase();
+  const prefixes = current[productName] ?? [];
+  if (updated.status === "approved") {
+    if (prefixes.includes(prefix)) return current;
+    return { ...current, [productName]: [...prefixes, prefix] };
+  }
+  if (!prefixes.includes(prefix)) return current;
+  const next = prefixes.filter((item) => item !== prefix);
+  const copy = { ...current };
+  if (next.length === 0) delete copy[productName];
+  else copy[productName] = next;
+  return copy;
 }
 
 function orderedPrefixEntries(
@@ -184,6 +209,33 @@ export default function ReconcilePage() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  // Admin bisa memutuskan langsung dari lonceng Header. Sinkronkan kartu
+  // usulan yang sedang tampil tanpa perlu upload ulang.
+  useEffect(() => {
+    const onSuggestionChanged = (event: Event) => {
+      const detail = (event as CustomEvent<PrefixSuggestionsChangedDetail>)
+        .detail;
+      const updated = detail?.suggestion;
+      if (!updated) return;
+
+      const key = prefixSuggestionKey(
+        updated.productName,
+        updated.suggestedPrefix
+      );
+      setStoredSuggestions((prev) => ({ ...prev, [key]: updated }));
+      setExtraPrefixes((prev) => withSuggestionPrefixApplied(prev, updated));
+    };
+    window.addEventListener(
+      PREFIX_SUGGESTIONS_CHANGED_EVENT,
+      onSuggestionChanged
+    );
+    return () =>
+      window.removeEventListener(
+        PREFIX_SUGGESTIONS_CHANGED_EVENT,
+        onSuggestionChanged
+      );
   }, []);
 
   /**
@@ -498,6 +550,7 @@ export default function ReconcilePage() {
       }
       setStoredSuggestions(stored);
       setSuggestionState("saved");
+      emitPrefixSuggestionsChanged();
     } catch (e) {
       setSuggestionState("failed");
       setSuggestionError(
@@ -550,22 +603,9 @@ export default function ReconcilePage() {
         throw new Error("Respons keputusan usulan tidak valid.");
       }
       setStoredSuggestions((prev) => ({ ...prev, [key]: updated }));
-      setExtraPrefixes((prev) => {
-        const productName = updated.productName.trim().toUpperCase();
-        const prefix = updated.suggestedPrefix.trim().toUpperCase();
-        const current = prev[productName] ?? [];
-        if (updated.status === "approved") {
-          if (current.includes(prefix)) return prev;
-          return { ...prev, [productName]: [...current, prefix] };
-        }
-        if (!current.includes(prefix)) return prev;
-        const next = current.filter((item) => item !== prefix);
-        const copy = { ...prev };
-        if (next.length === 0) delete copy[productName];
-        else copy[productName] = next;
-        return copy;
-      });
+      setExtraPrefixes((prev) => withSuggestionPrefixApplied(prev, updated));
       setDecisionState((prev) => ({ ...prev, [key]: "saved" }));
+      emitPrefixSuggestionsChanged(updated);
     } catch (e) {
       setDecisionState((prev) => ({ ...prev, [key]: "failed" }));
       setDecisionError(
@@ -968,13 +1008,20 @@ export default function ReconcilePage() {
                             Diabaikan
                           </span>
                         )}
-                        {status === "pending" && !isAdmin && role === "USER" && (
-                          <span className="text-[11px] font-semibold text-slate-500">
-                            Menunggu tinjauan admin
+                        {status === "pending" && !isAdmin && (
+                          <span className="max-w-full text-[11px] font-semibold text-slate-500">
+                            Usulan prefix{" "}
+                            <code className="rounded bg-sky-100 px-1 py-px font-mono text-sky-800">
+                              {suggestion.suggestedPrefix}
+                            </code>{" "}
+                            telah diajukan &amp; menunggu persetujuan Admin
                           </span>
                         )}
                         {status === "pending" && isAdmin && (
                           <>
+                            <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700">
+                              Menunggu
+                            </span>
                             <button
                               type="button"
                               disabled={deciding}

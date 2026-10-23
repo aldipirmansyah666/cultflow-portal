@@ -1,5 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 
 const state = vi.hoisted(() => ({ pathname: "/bailout" }));
 
@@ -26,6 +31,12 @@ vi.mock("next/link", () => ({
 import { Header } from "./Header";
 import { LayoutShell } from "./LayoutShell";
 
+afterEach(() => {
+  state.pathname = "/bailout";
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
 describe("Header", () => {
   it("menampilkan breadcrumb halaman aktif", () => {
     render(
@@ -43,6 +54,98 @@ describe("Header", () => {
     expect(
       screen.getByRole("button", { name: /menu pengguna/i }),
     ).toBeInTheDocument();
+  });
+
+  it("menampilkan badge dan toast usulan prefix pending untuk ADMIN", async () => {
+    state.pathname = "/reconcile";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/auth/me") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ user: { name: "Admin", role: "ADMIN" } }),
+          } as Response;
+        }
+        if (url === "/api/reconcile/prefix-suggestions") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              pendingCount: 1,
+              suggestions: [
+                {
+                  id: "s-1",
+                  productName: "PKH",
+                  suggestedPrefix: "BAC",
+                  sampleResi: "BAC001",
+                  occurrenceCount: 1,
+                  status: "pending",
+                  createdAt: "2026-10-23T00:00:00Z",
+                  updatedAt: "2026-10-23T01:00:00Z",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        throw new Error(`fetch tak terduga: ${url}`);
+      }),
+    );
+
+    render(
+      <Header
+        collapsed={false}
+        onToggleSidebar={() => {}}
+        onOpenMobileNav={() => {}}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("button", {
+        name: /notifikasi usulan prefix, 1 menunggu persetujuan/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        /Ada 1 usulan prefix baru \(BAC - PKH\) dari User/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("tidak menampilkan lonceng usulan untuk USER", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/auth/me") {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ user: { name: "User", role: "USER" } }),
+          } as Response;
+        }
+        return {
+          ok: false,
+          status: 403,
+          json: async () => ({ error: "Akses ditolak" }),
+        } as Response;
+      }),
+    );
+
+    render(
+      <Header
+        collapsed={false}
+        onToggleSidebar={() => {}}
+        onOpenMobileNav={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("User")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /notifikasi usulan prefix/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("memanggil onToggleSidebar saat tombol toggle diklik", () => {

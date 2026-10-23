@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
+  listPendingPrefixSuggestions,
   listStoredPrefixSuggestions,
   recordPrefixSuggestions,
   updatePrefixSuggestionStatus,
@@ -224,6 +225,128 @@ describe("listStoredPrefixSuggestions", () => {
     } as unknown as SupabaseClient;
 
     await expect(listStoredPrefixSuggestions(client, [])).resolves.toEqual([]);
+  });
+});
+
+describe("listPendingPrefixSuggestions", () => {
+  it("mengambil pending terbaru beserta jumlah total", async () => {
+    const client = {
+      from: (table: string) => {
+        expect(table).toBe("product_prefix_suggestions");
+        return {
+          select: (columns: string, options: { count?: string }) => {
+            expect(columns).toContain("suggested_prefix");
+            expect(options.count).toBe("exact");
+            return {
+              eq: (column: string, value: string) => {
+                expect(column).toBe("status");
+                expect(value).toBe("pending");
+                return {
+                  order: (column: string, options: { ascending: boolean }) => {
+                    expect(options.ascending).toBe(false);
+                    expect(["updated_at", "occurrence_count"]).toContain(column);
+                    return {
+                      order: (
+                        column2: string,
+                        options2: { ascending: boolean }
+                      ) => {
+                        expect(options2.ascending).toBe(false);
+                        expect(column2).toBe("occurrence_count");
+                        return {
+                          limit: async (limit: number) => {
+                            expect(limit).toBe(10);
+                            return {
+                              data: [
+                                {
+                                  id: "s-9",
+                                  product_name: "PKH",
+                                  suggested_prefix: "BAC",
+                                  sample_resi: "BAC001",
+                                  occurrence_count: 4,
+                                  status: "pending",
+                                  created_at: "2026-10-23T00:00:00Z",
+                                  updated_at: "2026-10-23T01:00:00Z",
+                                },
+                              ],
+                              count: 3,
+                              error: null,
+                            };
+                          },
+                        };
+                      },
+                    };
+                  },
+                };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as SupabaseClient;
+
+    await expect(listPendingPrefixSuggestions(client)).resolves.toEqual({
+      pendingCount: 3,
+      suggestions: [
+        {
+          id: "s-9",
+          productName: "PKH",
+          suggestedPrefix: "BAC",
+          sampleResi: "BAC001",
+          occurrenceCount: 4,
+          status: "pending",
+          createdAt: "2026-10-23T00:00:00Z",
+          updatedAt: "2026-10-23T01:00:00Z",
+        },
+      ],
+    });
+  });
+
+  it("membatasi limit dan fallback count ke jumlah baris", async () => {
+    const client = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              order: () => ({
+                limit: async (limit: number) => {
+                  expect(limit).toBe(50);
+                  return { data: [], count: null, error: null };
+                },
+              }),
+            }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    await expect(listPendingPrefixSuggestions(client, 999)).resolves.toEqual({
+      pendingCount: 0,
+      suggestions: [],
+    });
+  });
+
+  it("melempar error bila query gagal", async () => {
+    const client = {
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            order: () => ({
+              order: () => ({
+                limit: async () => ({
+                  data: null,
+                  count: null,
+                  error: { message: "db down" },
+                }),
+              }),
+            }),
+          }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+
+    await expect(listPendingPrefixSuggestions(client)).rejects.toThrow(
+      "Gagal membaca usulan prefix pending"
+    );
   });
 });
 

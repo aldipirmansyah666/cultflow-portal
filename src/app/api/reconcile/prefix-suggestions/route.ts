@@ -1,6 +1,7 @@
 /**
  * /api/reconcile/prefix-suggestions — simpan & tinjau usulan prefix.
  *
+ * GET   : daftar usulan pending + jumlah total untuk badge admin (ADMIN).
  * POST  : upsert kelompok prefix dari satu hasil validasi (semua role login).
  * PATCH : setujui/abaikan satu usulan berdasarkan produk + prefix, lalu
  *         sinkronkan prefix aktif ke tabel master dalam RPC atomik (ADMIN).
@@ -9,6 +10,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { getSession, isAdminSession } from "@/lib/session";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import {
+  listPendingPrefixSuggestions,
   listStoredPrefixSuggestions,
   recordPrefixSuggestions,
   updatePrefixSuggestionStatus,
@@ -83,6 +85,24 @@ async function requireAdmin() {
     return NextResponse.json({ error: "Akses ditolak" }, { status: 403 });
   }
   return null;
+}
+
+export async function GET() {
+  const unauthorized = await requireAdmin();
+  if (unauthorized) return unauthorized;
+
+  try {
+    const result = await listPendingPrefixSuggestions(getSupabaseAdmin());
+    return NextResponse.json(result, {
+      headers: { "Cache-Control": "no-store" },
+    });
+  } catch (e) {
+    console.error("[reconcile/prefix-suggestions] gagal membaca pending:", e);
+    return NextResponse.json(
+      { error: "Gagal membaca usulan prefix pending. Coba lagi." },
+      { status: 503 }
+    );
+  }
 }
 
 export async function POST(req: NextRequest) {
