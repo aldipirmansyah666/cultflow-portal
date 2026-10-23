@@ -12,7 +12,7 @@ import {
   verifySessionToken,
 } from "@/lib/session";
 
-const ADMIN_PREFIXES = ["/user-management", "/admin"];
+const ADMIN_PREFIXES = ["/user-management", "/admin", "/reconcile"];
 
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;

@@ -217,6 +217,68 @@ describe("validateReconcileRows — Rule 1 (row-level)", () => {
       { produk: "PKH" },
     ]);
     expect(result.rows.map((row) => row.isValid)).toEqual([false, false]);
+    expect(result.rows[0]?.code).toBe("EMPTY_RESI");
+    expect(result.rows[0]?.reason).toBe("Nomor resi kosong");
+  });
+});
+
+describe("validateReconcileRows — usulan prefix otomatis", () => {
+  it("mengelompokkan prefix mismatch per produk dan menghitung frekuensi", () => {
+    const result = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "XYZ001" },
+      { produk: "PKH", nomor_resi: " xyz002 " },
+      { produk: "PKH", nomor_resi: "ABC003" },
+      { produk: "EC3", nomor_resi: "TTSPOS1" },
+      { produk: "PKH", nomor_resi: "P2601" },
+      { produk: "REG", nomor_resi: "XYZ999" },
+    ]);
+
+    expect(result.prefixSuggestions).toHaveLength(3);
+    expect(result.prefixSuggestions).toContainEqual({
+      productName: "PKH",
+      suggestedPrefix: "XYZ",
+      sampleResi: "XYZ001",
+      occurrenceCount: 2,
+    });
+    expect(result.prefixSuggestions).toContainEqual({
+      productName: "PKH",
+      suggestedPrefix: "ABC",
+      sampleResi: "ABC003",
+      occurrenceCount: 1,
+    });
+    expect(result.prefixSuggestions).toContainEqual({
+      productName: "EC3",
+      suggestedPrefix: "TTS",
+      sampleResi: "TTSPOS1",
+      occurrenceCount: 1,
+    });
+  });
+
+  it("tidak mengusulkan prefix < 3 karakter atau non-alfanumerik", () => {
+    const result = validateReconcileRows([
+      { produk: "P260", nomor_resi: "SH" },
+      { produk: "P260", nomor_resi: "A#1" },
+      { produk: "P260", nomor_resi: "A1" },
+    ]);
+
+    expect(result.prefixSuggestions).toEqual([]);
+  });
+
+  it("tetap mengusulkan prefix dari baris mismatch yang duplikat", () => {
+    const result = validateReconcileRows([
+      { produk: "PKH", nomor_resi: "XYZ001" },
+      { produk: "PKH", nomor_resi: "XYZ001" },
+    ]);
+
+    expect(result.rows[0]?.code).toBe("PREFIX_MISMATCH");
+    expect(result.prefixSuggestions).toEqual([
+      {
+        productName: "PKH",
+        suggestedPrefix: "XYZ",
+        sampleResi: "XYZ001",
+        occurrenceCount: 2,
+      },
+    ]);
   });
 });
 
@@ -273,6 +335,23 @@ describe("validateReconcileRows — Rule 2 (file-level)", () => {
     ]);
     expect(mixed.fileIssues).toHaveLength(2);
     expect(mixed.isValid).toBe(false);
+  });
+
+  it("cakupan prefix hanya dihitung dari baris valid (duplikat tidak menutupi)", () => {
+    const result = validateReconcileRows([
+      { produk: "EC3", nomor_resi: "SHPE1" },
+      { produk: "EC3", nomor_resi: "P26001" },
+      { produk: "EC3", nomor_resi: "P26001" },
+    ]);
+    // P26 ada, tetapi kedua barisnya ganda (invalid) → SHPE/P26 coverage
+    // tetap wajib dilaporkan; jangan memakai baris invalid sebagai bukti.
+    expect(result.rows[1]?.code).toBe("DUPLICATE_RESI");
+    expect(result.fileIssues.map((i) => i.rule)).toContain(
+      "EC3_PREFIX_COVERAGE"
+    );
+    expect(
+      result.fileIssues.some((i) => i.message.includes("prefix P26"))
+    ).toBe(true);
   });
 
   it("berkas tanpa produk didukung tidak punya file issue (baris tetap invalid)", () => {
@@ -338,6 +417,10 @@ describe("buildReconcileBreakdown", () => {
         "26": 0,
       },
       ec3ValidByPrefix: { SHPE: 1, P26: 1 },
+      validByPrefix: {
+        PKH: { P26: 2, TTSPOS: 1, "26MNG": 1 },
+        EC3: { SHPE: 1, P26: 1 },
+      },
       otherValid: 0,
       otherInvalid: 0,
       peValid: 0,
@@ -352,6 +435,47 @@ describe("buildReconcileBreakdown", () => {
       duplicateResiRows: 0,
       duplicateResiGroups: 0,
     });
+  });
+
+  it("menghitung prefix approved dinamis (PKH OID) di rincian", () => {
+    const result = validateReconcileRows(
+      [
+        { produk: "PKH", nomor_resi: "P2601" },
+        { produk: "PKH", nomor_resi: "TTSPOS2" },
+        { produk: "PKH", nomor_resi: "OID3" },
+        { produk: "PKH", nomor_resi: "OID4" },
+      ],
+      { extraProductPrefixes: { PKH: ["OID"] } }
+    );
+    const breakdown = buildReconcileBreakdown(result.rows, {
+      extraProductPrefixes: { PKH: ["OID"] },
+    });
+
+    expect(breakdown.pkhValid).toBe(4);
+    expect(breakdown.pkhValidByPrefix.OID).toBe(2);
+    expect(breakdown.validByPrefix.PKH).toMatchObject({
+      P26: 1,
+      TTSPOS: 1,
+      OID: 2,
+    });
+  });
+
+  it("menghitung prefix approved dinamis untuk PE dan layanan generik", () => {
+    const pe = validateReconcileRows(
+      [
+        { produk: "PE", nomor_resi: "OID1" },
+        { produk: "PE", nomor_resi: "OID2" },
+        { produk: "Q9", nomor_resi: "AB1" },
+      ],
+      { extraProductPrefixes: { PE: ["OID"], Q9: ["AB"] } }
+    );
+    const breakdown = buildReconcileBreakdown(pe.rows, {
+      extraProductPrefixes: { PE: ["OID"], Q9: ["AB"] },
+    });
+
+    expect(breakdown.peValid).toBe(2);
+    expect(breakdown.validByPrefix.PE).toEqual({ OID: 2 });
+    expect(breakdown.validByPrefix.Q9).toEqual({ AB: 1 });
   });
 
   it("prefix generik 26 tidak menelan prefix spesifik (longest-match)", () => {
@@ -635,6 +759,58 @@ describe("layanan POS baru (3PE, 312, Q9, ...)", () => {
     expect(incomplete.fileIssues[0]).toMatchObject({
       rule: "PRODUCT_PREFIX_COVERAGE",
     });
+  });
+
+  it("prefix tambahan approved membuat resi PKH OID valid dan cakupan tetap lengkap", () => {
+    const result = validateReconcileRows(
+      [
+        { produk: "PKH", nomor_resi: "P260111" },
+        { produk: "PKH", nomor_resi: "TTSPOS222" },
+        { produk: "PKH", nomor_resi: "OID6821522040" },
+      ],
+      { extraProductPrefixes: { PKH: ["OID"] } }
+    );
+    expect(result.rows.every((row) => row.isValid)).toBe(true);
+    expect(result.fileIssues).toHaveLength(0);
+    expect(result.prefixSuggestions).toHaveLength(0);
+    expect(result.isValid).toBe(true);
+  });
+
+  it("prefix tambahan dinormalkan, dideduplikasi, dan hanya berlaku per produk", () => {
+    const pkh = validateReconcileRows(
+      [
+        { produk: "PKH", nomor_resi: "P260111" },
+        { produk: "PKH", nomor_resi: "TTSPOS222" },
+        { produk: "PKH", nomor_resi: "oid6821522040" },
+      ],
+      { extraProductPrefixes: { pkh: ["oid", " OID ", "bad#", "OID"] } }
+    );
+    expect(pkh.rows.every((row) => row.isValid)).toBe(true);
+
+    const ec3 = validateReconcileRows(
+      [{ produk: "EC3", nomor_resi: "OID6821522040" }],
+      { extraProductPrefixes: { PKH: ["OID"] } }
+    );
+    expect(ec3.rows[0]?.code).toBe("PREFIX_MISMATCH");
+    expect(ec3.rows[0]?.reason).toBe(
+      "Resi EC3 harus diawali SHPE atau P26"
+    );
+  });
+
+  it("prefix tambahan ikut dihitung pada cakupan PE dan layanan generik", () => {
+    const pe = validateReconcileRows(
+      [{ produk: "PE", nomor_resi: "OID123456" }],
+      { extraProductPrefixes: { PE: ["OID"] } }
+    );
+    expect(pe.rows[0]?.isValid).toBe(true);
+    expect(pe.fileIssues).toHaveLength(0);
+
+    const q9 = validateReconcileRows(
+      [{ produk: "Q9", nomor_resi: "AB12345" }],
+      { extraProductPrefixes: { Q9: ["AB"] } }
+    );
+    expect(q9.rows[0]?.isValid).toBe(true);
+    expect(q9.fileIssues).toHaveLength(0);
   });
 
   it("breakdown.byProduct merangkum layanan baru; REG tetap UNKNOWN", () => {

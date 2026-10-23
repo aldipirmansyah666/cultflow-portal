@@ -20,6 +20,8 @@ export interface DbUser {
   password: string;
   role: UserRole;
   created_at: string;
+  /** Versi sesi JWT; dinaikkan saat logout / role / password berubah. */
+  token_version: number;
 }
 
 /** Baris user aman untuk browser (tanpa password). */
@@ -48,9 +50,20 @@ export interface UpdateUserInput {
 
 export interface AuthResult {
   user: SafeUser;
+  /** Versi sesi saat login — disalin ke klaim JWT. */
+  tokenVersion: number;
   /** True bila hash lama (SHA-256) — pemanggil sebaiknya rehash ke bcrypt. */
   needsRehash: boolean;
 }
+
+/**
+ * Hash bcrypt valid untuk password acak yang tidak pernah dipakai.
+ * Dipakai saat username tidak ditemukan agar biaya verifikasi tetap sama
+ * dengan user yang ada (anti timing-based user enumeration).
+ * Nilai ini bukan kredensial aplikasi; hanya dummy compare.
+ */
+const DUMMY_BCRYPT_HASH =
+  "$2b$10$ZNUokKSAUsAa9t2bwVj/b.zksH18SVKyvUybidYfTcR3xkBSVVzfa";
 
 /**
  * Validasi + normalisasi role, case-insensitive.
@@ -89,7 +102,7 @@ function dbError(context: string, message: string): Error {
 export async function getUsers(client: SupabaseClient): Promise<DbUser[]> {
   const { data, error } = await client
     .from("users")
-    .select("id,name,username,password,role,created_at")
+    .select("id,name,username,password,role,created_at,token_version")
     .order("created_at", { ascending: true });
   if (error) throw dbError("list", `Gagal membaca tabel users: ${error.message}`);
   return (data ?? []) as DbUser[];
@@ -102,7 +115,7 @@ export async function findUserByUsername(
 ): Promise<DbUser | null> {
   const { data, error } = await client
     .from("users")
-    .select("id,name,username,password,role,created_at")
+    .select("id,name,username,password,role,created_at,token_version")
     .eq("username", username)
     .limit(1);
   if (error) throw dbError("find", `Gagal mencari user: ${error.message}`);
@@ -132,7 +145,7 @@ export async function createUser(
       password: input.passwordHash,
       role: input.role,
     })
-    .select("id,name,username,password,role,created_at")
+    .select("id,name,username,password,role,created_at,token_version")
     .single();
   if (error) {
     if (error.code === "23505") {
@@ -175,6 +188,27 @@ export async function updateUser(
   if (error) throw dbError("update", `Gagal memperbarui user: ${error.message}`);
 }
 
+/**
+ * Cabut semua token user dengan menaikkan token_version secara atomik.
+ * Dipakai logout dan saat admin mengubah role/password user.
+ */
+export async function bumpUserTokenVersion(
+  client: SupabaseClient,
+  id: string
+): Promise<number> {
+  const { data, error } = await client.rpc("bump_user_token_version", {
+    p_user_id: id,
+  });
+  if (error) {
+    throw dbError("bump-token", `Gagal mencabut sesi user: ${error.message}`);
+  }
+  const version = typeof data === "number" ? data : Number(data);
+  if (!Number.isInteger(version) || version < 1) {
+    throw dbError("bump-token", "Respons token_version tidak valid");
+  }
+  return version;
+}
+
 /** Hapus user by id. */
 export async function deleteUser(
   client: SupabaseClient,
@@ -194,8 +228,16 @@ export async function authenticateUser(
   password: string
 ): Promise<AuthResult | null> {
   const user = await findUserByUsername(client, username);
-  if (!user) return null;
-  const valid = await verifyPassword(password, user.password);
-  if (!valid) return null;
-  return { user: toSafeUser(user), needsRehash: isLegacyHash(user.password) };
+  // Selalu jalankan bcrypt, termasuk saat user tidak ada, agar waktu respons
+  // login tidak membocorkan keberadaan username.
+  const valid = await verifyPassword(
+    password,
+    user?.password ?? DUMMY_BCRYPT_HASH
+  );
+  if (!user || !valid) return null;
+  return {
+    user: toSafeUser(user),
+    tokenVersion: user.token_version,
+    needsRehash: isLegacyHash(user.password),
+  };
 }

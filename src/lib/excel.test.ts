@@ -36,6 +36,15 @@ describe("parseCsvMatrix — T1 kutip liar (stray quotes)", () => {
     expect(result.matrix[2]).toEqual(["PKH", "TTSPOS9"]);
   });
 
+  it("sourceRows menunjuk baris fisik CSV (termasuk field multi-baris)", () => {
+    const csv = 'judul\n\nproduk;resi\n"multi\nline";ok\nPKH;P26123\n';
+    const result = parseCsvMatrix(csv, null);
+
+    // judul=1, header=3, field multi-baris mulai baris 4 (span 4-5), data=6.
+    expect(result.sourceRows).toEqual([1, 3, 4, 6]);
+    expect(result.matrix[2]?.[0]).toBe("multi\nline");
+  });
+
   it("field kutip valid RFC-4180 (\"a;b\", multi-baris, escape \"\") tetap didukung", () => {
     const csv = 'a;b\n"p;q";ok\n"multi\nline";ok2\n"esc ""q""";ok3\n';
     const result = parseCsvMatrix(csv, null);
@@ -162,6 +171,7 @@ describe("loadWorkbookFromBuffer — routing format", () => {
     });
     expect(wb.sheetNames).toEqual(["Rekon"]);
     expect(wb.matrices.get("Rekon")).toHaveLength(3);
+    expect(wb.sourceRows.get("Rekon")).toEqual([1, 2, 3]);
   });
 
   it(".xls OLE2 ditolak dengan pesan konversi (tanpa fallback CSV)", async () => {
@@ -191,6 +201,7 @@ describe("loadWorkbookFromBuffer — routing format", () => {
       ["PKH", "P26123"],
       ["EC3", "SHPE1"],
     ]);
+    expect(wb.sourceRows.get("Table1")).toEqual([1, 2, 3]);
   });
 
   it("HTML tanpa <table> tetap ditolak dengan pesan jelas", async () => {
@@ -217,6 +228,7 @@ describe("loadWorkbookFromBuffer — routing format", () => {
     });
     expect(wb.sheetNames).toEqual(["Sheet1"]);
     expect(wb.matrices.get("Sheet1")).toHaveLength(3);
+    expect(wb.sourceRows.get("Sheet1")).toEqual([1, 2, 3]);
   });
 
   it("SpreadsheetML 2003 diekstrak per worksheet", async () => {
@@ -236,6 +248,7 @@ describe("loadWorkbookFromBuffer — routing format", () => {
       ["produk", "nomor_resi"],
       ["PKH", "P26123"],
     ]);
+    expect(wb.sourceRows.get("Rekon")).toEqual([1, 2]);
   });
 });
 

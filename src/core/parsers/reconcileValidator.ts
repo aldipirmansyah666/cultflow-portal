@@ -8,6 +8,8 @@
  * Rule 2 (file-level): cakupan prefix wajib dalam satu berkas — DIPERIKSA
  * PER PRODUK (prefix EC3 hanya dihitung dari baris EC3, dst.) agar berkas
  * campuran tidak lolos false-negative.
+ * Turunan: prefix 3 karakter dari baris PREFIX_MISMATCH dikelompokkan per
+ * produk untuk diusulkan sebagai prefix baru (tidak mengubah status baris).
  */
 
 export interface ReconcileInputRow {
@@ -23,6 +25,7 @@ export interface ReconcileInputRow {
 /** Kategori mesin tiap celah baris — untuk filter/agregasi di UI. */
 export type ReconcileRowCode =
   | "PREFIX_MISMATCH"
+  | "EMPTY_RESI"
   | "UNKNOWN_OR_INVALID_PRODUCT"
   | "DUPLICATE_RESI";
 
@@ -52,9 +55,21 @@ export interface ReconcileFileIssue {
   message: string;
 }
 
+/**
+ * Prefix 3 karakter yang tidak dikenali untuk sebuah produk, dikumpulkan
+ * dari baris PREFIX_MISMATCH agar bisa ditinjau sebagai usulan prefix baru.
+ */
+export interface ReconcilePrefixSuggestion {
+  productName: string;
+  suggestedPrefix: string;
+  sampleResi: string;
+  occurrenceCount: number;
+}
+
 export interface ReconcileValidationResult {
   rows: ReconcileRowResult[];
   fileIssues: ReconcileFileIssue[];
+  prefixSuggestions: ReconcilePrefixSuggestion[];
   isValid: boolean;
   summary: { total: number; valid: number; invalid: number };
 }
@@ -141,6 +156,41 @@ function isSupportedProduct(value: string): value is SupportedProduct {
   return (SUPPORTED_PRODUCTS as readonly string[]).includes(value);
 }
 
+const EXTRA_PREFIX_RE = /^[A-Z0-9]{2,16}$/;
+
+/**
+ * Gabungkan prefix bawaan dengan prefix tambahan yang disetujui admin
+ * (dibaca dari tabel `product_prefixes`). Prefix tambahan tidak pernah
+ * mengganti prefix bawaan; hanya menambah dan dideduplikasi.
+ */
+function buildProductPrefixes(
+  extra?: Readonly<Record<string, readonly string[]>>
+): Record<SupportedProduct, readonly string[]> {
+  const mergedMap = { ...PRODUCT_PREFIXES };
+  if (!extra) return mergedMap;
+
+  for (const [rawProduct, extraPrefixes] of Object.entries(extra)) {
+    const produk = rawProduct.trim().toUpperCase();
+    if (!isSupportedProduct(produk) || !Array.isArray(extraPrefixes)) continue;
+    if (extraPrefixes.length === 0) continue;
+
+    const seen = new Set(mergedMap[produk]);
+    const merged = [...mergedMap[produk]];
+    for (const raw of extraPrefixes) {
+      if (typeof raw !== "string") continue;
+      const prefix = raw.trim().toUpperCase();
+      if (!EXTRA_PREFIX_RE.test(prefix) || seen.has(prefix)) continue;
+      seen.add(prefix);
+      merged.push(prefix);
+    }
+    if (merged.length !== mergedMap[produk].length) {
+      mergedMap[produk] = merged;
+    }
+  }
+
+  return mergedMap;
+}
+
 /**
  * Alias nilai kolom Produk -> kode produk kanonik.
  *
@@ -189,15 +239,6 @@ function startsWithAny(resi: string, prefixes: readonly string[]): boolean {
 }
 
 /**
- * Prefix PKH terurut panjang-menurun untuk penghitungan breakdown
- * (longest-match): tanpa ini, prefix generik "26" akan menelan "26MNG",
- * "26KOM", dsb. Validasi `startsWithAny` tidak sensitif urutan.
- */
-const PKH_PREFIXES_BY_LENGTH: readonly (
-  (typeof PKH_ACCEPTED_PREFIXES)[number]
-)[] = [...PKH_ACCEPTED_PREFIXES].sort((a, b) => b.length - a.length);
-
-/**
  * Daftar prefix untuk pesan alasan, gaya Indonesia:
  * ["A"] -> "A"; ["A","B"] -> "A atau B";
  * ["A","B","C"] -> "A, B, atau C". Dibangun dinamis dari konstanta
@@ -215,7 +256,11 @@ const UNKNOWN_PRODUCT_REASON =
 const DUPLICATE_RESI_REASON =
   "DUPLICATE_RESI: nomor resi ganda dalam berkas";
 
-function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult {
+function validateRow(
+  row: ReconcileInputRow,
+  index: number,
+  prefixesByProduct: Record<SupportedProduct, readonly string[]>
+): ReconcileRowResult {
   // Nomor baris asli di berkas (bila pemanggil menyediakannya); fallback
   // ke index+1 untuk pemanggil lama yang tak melacak posisi baris.
   const sourceRow =
@@ -243,10 +288,22 @@ function validateRow(row: ReconcileInputRow, index: number): ReconcileRowResult 
     };
   }
 
-  if (!startsWithAny(nomorResi, PRODUCT_PREFIXES[produk])) {
-    const accepted = PRODUCT_PREFIXES[produk];
+  if (nomorResi === "") {
+    return {
+      index,
+      sourceRow,
+      produk,
+      nomorResi,
+      isValid: false,
+      reason: "Nomor resi kosong",
+      code: "EMPTY_RESI",
+    };
+  }
+
+  const accepted = prefixesByProduct[produk];
+  if (!startsWithAny(nomorResi, accepted)) {
     const reason =
-      produk === "EC3"
+      produk === "EC3" && accepted === EC3_PREFIXES
         ? "Resi EC3 harus diawali SHPE atau P26"
         : accepted === SHARED_PREFIXES_PKH_PJB_PE
           ? `Resi ${produk} harus diawali ${formatPrefixList(SHARED_PREFIXES_PKH_PJB_PE)}`
@@ -294,25 +351,31 @@ function markDuplicateResi(rows: ReconcileRowResult[]): void {
   }
 }
 
-function checkFileCoverage(results: ReconcileRowResult[]): ReconcileFileIssue[] {
+function checkFileCoverage(
+  results: ReconcileRowResult[],
+  prefixesByProduct: Record<SupportedProduct, readonly string[]>
+): ReconcileFileIssue[] {
   const issues: ReconcileFileIssue[] = [];
   const hasProduct = (produk: string) =>
     results.some((row) => row.produk === produk);
-  // WAJIB per produk: prefix hanya dihitung dari baris berproduk sama.
+  // WAJIB per produk DAN hanya dari baris valid: baris invalid/duplikat
+  // tidak boleh menjadi bukti cakupan prefix.
   // (Sebelumnya lintas-produk: resi P26 milik EC3 bisa membuat syarat
   // PKH lolos — false negative pada berkas campuran.)
   const hasResiPrefixFor = (produk: string, prefix: string) =>
     results.some(
-      (row) => row.produk === produk && row.nomorResi.startsWith(prefix)
+      (row) =>
+        row.isValid && row.produk === produk && row.nomorResi.startsWith(prefix)
     );
   // Cakupan longgar untuk PE/PJB: cukup SATU resi berproduk sama yang
   // diawali SALAH SATU prefix bersama. Mencegah false warning pada
   // berkas valid (mis. resi 26KOM sah tetapi tidak berprefix "PE").
-  const hasSharedPrefixFor = (produk: string) =>
+  const hasSharedPrefixFor = (produk: SupportedProduct) =>
     results.some(
       (row) =>
+        row.isValid &&
         row.produk === produk &&
-        SHARED_PREFIXES_PKH_PJB_PE.some((prefix) =>
+        prefixesByProduct[produk].some((prefix) =>
           row.nomorResi.startsWith(prefix)
         )
     );
@@ -356,14 +419,14 @@ function checkFileCoverage(results: ReconcileRowResult[]): ReconcileFileIssue[] 
   if (hasProduct("PE") && !hasSharedPrefixFor("PE")) {
     issues.push({
       rule: "PRODUCT_PREFIX_COVERAGE",
-      message: `Berkas memuat produk PE tetapi tidak ada resi PE berprefix valid (${formatPrefixList(SHARED_PREFIXES_PKH_PJB_PE)})`,
+      message: `Berkas memuat produk PE tetapi tidak ada resi PE berprefix valid (${formatPrefixList(prefixesByProduct.PE)})`,
     });
   }
 
   if (hasProduct("PJB") && !hasSharedPrefixFor("PJB")) {
     issues.push({
       rule: "PRODUCT_PREFIX_COVERAGE",
-      message: `Berkas memuat produk PJB tetapi tidak ada resi PJB berprefix valid (${formatPrefixList(SHARED_PREFIXES_PKH_PJB_PE)})`,
+      message: `Berkas memuat produk PJB tetapi tidak ada resi PJB berprefix valid (${formatPrefixList(prefixesByProduct.PJB)})`,
     });
   }
 
@@ -375,11 +438,13 @@ function checkFileCoverage(results: ReconcileRowResult[]): ReconcileFileIssue[] 
     if (STRICT_COVERAGE_PRODUCTS.has(produk)) continue;
     if (
       hasProduct(produk) &&
-      !PRODUCT_PREFIXES[produk].some((prefix) => hasResiPrefixFor(produk, prefix))
+      !prefixesByProduct[produk].some((prefix) =>
+        hasResiPrefixFor(produk, prefix)
+      )
     ) {
       issues.push({
         rule: "PRODUCT_PREFIX_COVERAGE",
-        message: `Berkas memuat produk ${produk} tetapi tidak ada resi ${produk} berprefix valid (${formatPrefixList(PRODUCT_PREFIXES[produk])})`,
+        message: `Berkas memuat produk ${produk} tetapi tidak ada resi ${produk} berprefix valid (${formatPrefixList(prefixesByProduct[produk])})`,
       });
     }
   }
@@ -392,10 +457,18 @@ export interface ReconcileBreakdown {
   ec3Valid: number;
   pkhInvalid: number;
   ec3Invalid: number;
-  /** Resi valid per prefix PKH (longest-match; lihat buildReconcileBreakdown). */
-  pkhValidByPrefix: Record<(typeof PKH_ACCEPTED_PREFIXES)[number], number>;
-  /** Resi valid per prefix (EC3: SHPE/P26). */
-  ec3ValidByPrefix: Record<(typeof EC3_PREFIXES)[number], number>;
+  /**
+   * Resi valid per prefix PKH (longest-match). Prefix approved dari database
+   * ikut masuk sebagai key tambahan, mis. OID.
+   */
+  pkhValidByPrefix: Record<string, number>;
+  /** Resi valid per prefix EC3 (longest-match), termasuk prefix approved. */
+  ec3ValidByPrefix: Record<string, number>;
+  /**
+   * Rincian resi valid per produk & prefix untuk semua produk, termasuk
+   * prefix tambahan approved. Dipakai UI agar label dinamis transparan.
+   */
+  validByPrefix: Record<string, Record<string, number>>;
   /** Baris valid/invalid produk P260 & TTSPOS. */
   otherValid: number;
   otherInvalid: number;
@@ -419,10 +492,27 @@ export interface ReconcileBreakdown {
   duplicateResiGroups: number;
 }
 
+export interface ReconcileBreakdownOptions {
+  /** Prefix approved per produk; dipakai untuk memasukkan label dinamis. */
+  extraProductPrefixes?: Readonly<Record<string, readonly string[]>>;
+}
+
 /** Rincian jumlah resi per produk & prefix dari hasil validasi baris. */
 export function buildReconcileBreakdown(
-  rows: ReconcileRowResult[]
+  rows: ReconcileRowResult[],
+  options: ReconcileBreakdownOptions = {}
 ): ReconcileBreakdown {
+  const prefixesByProduct = buildProductPrefixes(options.extraProductPrefixes);
+  // Longest-match agar "26MNG" tidak tertelan "26", termasuk prefix approved.
+  const sortedPrefixesByProduct = {} as Record<
+    SupportedProduct,
+    readonly string[]
+  >;
+  for (const produk of SUPPORTED_PRODUCTS) {
+    sortedPrefixesByProduct[produk] = [...prefixesByProduct[produk]].sort(
+      (a, b) => b.length - a.length || a.localeCompare(b)
+    );
+  }
   const breakdown: ReconcileBreakdown = {
     pkhValid: 0,
     ec3Valid: 0,
@@ -438,6 +528,7 @@ export function buildReconcileBreakdown(
       "26": 0,
     },
     ec3ValidByPrefix: { SHPE: 0, P26: 0 },
+    validByPrefix: {},
     otherValid: 0,
     otherInvalid: 0,
     peValid: 0,
@@ -467,30 +558,41 @@ export function buildReconcileBreakdown(
     const stat = (breakdown.byProduct[row.produk] ??= { valid: 0, invalid: 0 });
     if (row.isValid) stat.valid += 1;
     else stat.invalid += 1;
+
+    let matchedPrefix: string | null = null;
+    if (row.isValid) {
+      matchedPrefix =
+        sortedPrefixesByProduct[row.produk].find((prefix) =>
+          row.nomorResi.startsWith(prefix)
+        ) ?? null;
+      if (matchedPrefix) {
+        const productPrefixCounts =
+          (breakdown.validByPrefix[row.produk] ??= {});
+        productPrefixCounts[matchedPrefix] =
+          (productPrefixCounts[matchedPrefix] ?? 0) + 1;
+
+        if (row.produk === "PKH") {
+          breakdown.pkhValidByPrefix[matchedPrefix] =
+            (breakdown.pkhValidByPrefix[matchedPrefix] ?? 0) + 1;
+        } else if (row.produk === "EC3") {
+          breakdown.ec3ValidByPrefix[matchedPrefix] =
+            (breakdown.ec3ValidByPrefix[matchedPrefix] ?? 0) + 1;
+        }
+      }
+    }
+
     if (row.produk === "PKH") {
       if (!row.isValid) {
         breakdown.pkhInvalid += 1;
         continue;
       }
       breakdown.pkhValid += 1;
-      for (const prefix of PKH_PREFIXES_BY_LENGTH) {
-        if (row.nomorResi.startsWith(prefix)) {
-          breakdown.pkhValidByPrefix[prefix] += 1;
-          break;
-        }
-      }
     } else if (row.produk === "EC3") {
       if (!row.isValid) {
         breakdown.ec3Invalid += 1;
         continue;
       }
       breakdown.ec3Valid += 1;
-      for (const prefix of EC3_PREFIXES) {
-        if (row.nomorResi.startsWith(prefix)) {
-          breakdown.ec3ValidByPrefix[prefix] += 1;
-          break;
-        }
-      }
     } else if (row.produk === "P260" || row.produk === "TTSPOS") {
       if (!row.isValid) {
         breakdown.otherInvalid += 1;
@@ -562,22 +664,75 @@ export function paginateReconcileRows<T>(
   };
 }
 
+const PREFIX_SUGGESTION_RE = /^[A-Z0-9]{3}$/;
+
+/**
+ * Kumpulkan 3 karakter pertama dari setiap resi yang PREFIX_MISMATCH,
+ * kelompokkan per produk + prefix, lalu hitung frekuensinya. Prefix yang
+ * mengandung karakter selain huruf/angka (atau resi < 3 karakter) dilewati
+ * karena tidak layak diusulkan sebagai prefix resi.
+ */
+function collectPrefixSuggestions(
+  rows: ReconcileRowResult[],
+): ReconcilePrefixSuggestion[] {
+  const groups = new Map<string, ReconcilePrefixSuggestion>();
+
+  for (const row of rows) {
+    if (row.code !== "PREFIX_MISMATCH") continue;
+    const suggestedPrefix = row.nomorResi.slice(0, 3);
+    if (!PREFIX_SUGGESTION_RE.test(suggestedPrefix)) continue;
+
+    const key = `${row.produk}\u0000${suggestedPrefix}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.occurrenceCount += 1;
+    } else {
+      groups.set(key, {
+        productName: row.produk,
+        suggestedPrefix,
+        sampleResi: row.nomorResi,
+        occurrenceCount: 1,
+      });
+    }
+  }
+
+  return [...groups.values()].sort(
+    (a, b) =>
+      b.occurrenceCount - a.occurrenceCount ||
+      a.productName.localeCompare(b.productName) ||
+      a.suggestedPrefix.localeCompare(b.suggestedPrefix)
+  );
+}
+
 /**
  * Validasi baris-baris reconcile beserta cakupan file.
  * Perbandingan produk & resi bersifat case-insensitive (buang karakter tak
  * kasatmata + trim + uppercase; nomor resi juga hapus seluruh spasi dalam).
  */
+export interface ReconcileValidationOptions {
+  /**
+   * Prefix tambahan per produk yang sudah disetujui admin. Nilai dinormalkan
+   * dan digabung dengan prefix bawaan; tidak mengganti prefix bawaan.
+   */
+  extraProductPrefixes?: Readonly<Record<string, readonly string[]>>;
+}
+
 export function validateReconcileRows(
   rows: ReconcileInputRow[],
+  options: ReconcileValidationOptions = {},
 ): ReconcileValidationResult {
-  const validated = rows.map((row, index) => validateRow(row, index));
+  const prefixesByProduct = buildProductPrefixes(options.extraProductPrefixes);
+  const validated = rows.map((row, index) =>
+    validateRow(row, index, prefixesByProduct)
+  );
   markDuplicateResi(validated);
-  const fileIssues = checkFileCoverage(validated);
+  const fileIssues = checkFileCoverage(validated, prefixesByProduct);
   const invalid = validated.filter((row) => !row.isValid).length;
 
   return {
     rows: validated,
     fileIssues,
+    prefixSuggestions: collectPrefixSuggestions(validated),
     isValid: invalid === 0 && fileIssues.length === 0,
     summary: {
       total: validated.length,

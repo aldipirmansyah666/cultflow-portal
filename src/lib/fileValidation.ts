@@ -24,6 +24,31 @@ export const MAX_FEE_EXCEL_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
  */
 export const MAX_RECONCILE_FILE_SIZE_BYTES = 15 * 1024 * 1024; // 15 MB
 
+/**
+ * Ambang peringatan dini Reconcile: berkas < 1.000 KB (1 MB desimal) sering
+ * berarti ekspor belum lengkap. Ini hanya warning, bukan penolakan upload.
+ */
+export const RECONCILE_SMALL_FILE_WARNING_BYTES = 1000 * 1024;
+
+/**
+ * Peringatan non-blocking untuk berkas Reconcile yang terlalu kecil.
+ * Null bila ukuran sudah memadai atau file kosong (file kosong ditangani
+ * sebagai error oleh validateFileSize).
+ */
+export function getReconcileFileSizeWarning(
+  file: Pick<File, "name" | "size">
+): string | null {
+  if (
+    file.size <= 0 ||
+    file.size >= RECONCILE_SMALL_FILE_WARNING_BYTES
+  ) {
+    return null;
+  }
+
+  const sizeKb = Math.max(1, Math.floor(file.size / 1024));
+  return `Peringatan: Ukuran berkas "${file.name}" kurang dari 1.000 KB (${sizeKb} KB, di bawah 1 MB). Harap periksa kembali berkas Anda, jumlah resi mungkin belum sesuai atau belum lengkap.`;
+}
+
 export function validateFileSize(
   file: File,
   maxBytes = MAX_EXCEL_SIZE_BYTES

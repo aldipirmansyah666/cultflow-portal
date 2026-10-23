@@ -8,6 +8,7 @@ import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { getSession, isAdminSession } from "@/lib/session";
 import { hashPassword } from "@/lib/password";
 import {
+  bumpUserTokenVersion,
   createUser,
   deleteUser,
   findUserByUsername,
@@ -148,13 +149,22 @@ export async function PATCH(req: Request) {
   }
 
   try {
-    await updateUser(getSupabaseAdmin(), id, {
+    const supabase = getSupabaseAdmin();
+    await updateUser(supabase, id, {
       ...(typeof name === "string" && name.trim() !== "" ? { name } : {}),
       ...(role === "ADMIN" || role === "USER" ? { role } : {}),
       ...(typeof password === "string" && password !== ""
         ? { passwordHash: await hashPassword(password) }
         : {}),
     });
+    // Perubahan hak akses / kredensial harus langsung membatalkan sesi lama.
+    if (
+      role === "ADMIN" ||
+      role === "USER" ||
+      (typeof password === "string" && password !== "")
+    ) {
+      await bumpUserTokenVersion(supabase, id);
+    }
     return NextResponse.json({ success: true });
   } catch (e) {
     return NextResponse.json(

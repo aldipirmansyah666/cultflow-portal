@@ -151,7 +151,8 @@ export function normalizeCellValue(value: ExcelJS.CellValue): unknown {
  */
 export function worksheetToMatrix(
   ws: ExcelJS.Worksheet,
-  defval: unknown = null
+  defval: unknown = null,
+  sourceRows?: number[]
 ): unknown[][] {
   const colCount = ws.columnCount;
   const matrix: unknown[][] = [];
@@ -164,6 +165,8 @@ export function worksheetToMatrix(
       out.push(raw === null || raw === undefined ? defval : raw);
     }
     matrix.push(out);
+    // rowNumber adalah baris fisik worksheet (1-based), bukan indeks array.
+    sourceRows?.push(rowNumber);
   });
   return matrix;
 }
@@ -422,6 +425,8 @@ export function fileExtensionOf(fileName?: string): string {
 
 export interface CsvParseResult {
   matrix: unknown[][];
+  /** Nomor baris fisik (1-based) paralel dengan `matrix`. */
+  sourceRows: number[];
   /** Delimiter yang terdeteksi. */
   delimiter: string;
   /** Peringatan non-fatal: kutip tak berpasangan, baris tanpa newline, dll. */
@@ -432,7 +437,7 @@ export interface CsvParseResult {
 
 export interface HtmlParseResult {
   /** Satu matriks per <table> (dinamai "Table1", "Table2", ...). */
-  sheets: { name: string; matrix: unknown[][] }[];
+  sheets: { name: string; matrix: unknown[][]; sourceRows: number[] }[];
   warnings: string[];
 }
 
@@ -485,13 +490,20 @@ export function parseHtmlTableMatrices(
     .replace(/<script[\s\S]*?<\/script\s*>/gi, "")
     .replace(/<style[\s\S]*?<\/style\s*>/gi, "");
   const tables = clean.match(/<table\b[\s\S]*?<\/table\s*>/gi) ?? [];
-  const sheets: { name: string; matrix: unknown[][] }[] = [];
+  const sheets: {
+    name: string;
+    matrix: unknown[][];
+    sourceRows: number[];
+  }[] = [];
   tables.forEach((table, ti) => {
     const matrix: unknown[][] = [];
+    const sourceRows: number[] = [];
     const pending: { remaining: number; value: unknown }[] = [];
     const rowRe = /<tr\b[^>]*>([\s\S]*?)<\/tr\s*>/gi;
     let rm: RegExpExecArray | null;
+    let rowOrdinal = 0;
     while ((rm = rowRe.exec(table)) !== null) {
+      rowOrdinal += 1;
       const rowHtml = rm[1] ?? "";
       const row: unknown[] = [];
       let col = 0;
@@ -526,13 +538,17 @@ export function parseHtmlTableMatrices(
       if (!seenCell) continue;
       flushPending();
       const isEmpty = row.every((c) => c === defval);
-      if (!isEmpty) matrix.push(row);
+      if (!isEmpty) {
+        matrix.push(row);
+        // HTML tidak punya nomor baris spreadsheet; gunakan ordinal <tr>.
+        sourceRows.push(rowOrdinal);
+      }
       for (const p of pending) {
         if (p.remaining > 0) p.remaining -= 1;
       }
     }
     if (matrix.length > 0) {
-      sheets.push({ name: `Table${ti + 1}`, matrix });
+      sheets.push({ name: `Table${ti + 1}`, matrix, sourceRows });
     }
   });
   if (tables.length > 0 && sheets.length === 0) {
@@ -544,7 +560,7 @@ export function parseHtmlTableMatrices(
 }
 
 export interface XmlSpreadsheetResult {
-  sheets: { name: string; matrix: unknown[][] }[];
+  sheets: { name: string; matrix: unknown[][]; sourceRows: number[] }[];
   warnings: string[];
 }
 
@@ -558,7 +574,11 @@ export function parseXmlSpreadsheetMatrices(
   defval: unknown
 ): XmlSpreadsheetResult {
   const warnings: string[] = [];
-  const sheets: { name: string; matrix: unknown[][] }[] = [];
+  const sheets: {
+    name: string;
+    matrix: unknown[][];
+    sourceRows: number[];
+  }[] = [];
   const clean = xml.replace(/<!--[\s\S]*?-->/g, "");
   const wsRe = /<Worksheet\b([^>]*)>([\s\S]*?)<\/Worksheet\s*>/gi;
   let wm: RegExpExecArray | null;
@@ -570,9 +590,12 @@ export function parseXmlSpreadsheetMatrices(
     const nameM = /ss:Name\s*=\s*"([^"]+)"/i.exec(wsAttrs);
     const name = nameM?.[1] ?? `Sheet${wi}`;
     const matrix: unknown[][] = [];
+    const sourceRows: number[] = [];
     const rowRe = /<Row\b[^>]*>([\s\S]*?)<\/Row\s*>/gi;
     let rm: RegExpExecArray | null;
+    let rowOrdinal = 0;
     while ((rm = rowRe.exec(wsBody)) !== null) {
+      rowOrdinal += 1;
       const rowHtml = rm[1] ?? "";
       const row: unknown[] = [];
       const cellRe = /<Cell\b([^>]*)>([\s\S]*?)<\/Cell\s*>/gi;
@@ -589,9 +612,11 @@ export function parseXmlSpreadsheetMatrices(
       if (row.length === 0) continue;
       if (row.every((c) => c === defval)) continue;
       matrix.push(row);
+      // XML Spreadsheet tidak punya nomor baris Excel; gunakan ordinal <Row>.
+      sourceRows.push(rowOrdinal);
     }
     if (matrix.length > 0) {
-      sheets.push({ name, matrix });
+      sheets.push({ name, matrix, sourceRows });
     }
   }
   if (sheets.length === 0) {
@@ -638,6 +663,7 @@ export function parseCsvMatrix(
   const maxTotal = opts.maxTotalChars ?? EXCEL_MAX_TOTAL_CHARS;
   const delim = detectCsvDelimiter(text.slice(0, 64_000));
   const matrix: unknown[][] = [];
+  const sourceRows: number[] = [];
   const warnings: string[] = [];
   let truncatedCells = 0;
   let row: unknown[] = [];
@@ -645,6 +671,7 @@ export function parseCsvMatrix(
   let inQuotes = false;
   let quoteStartLine = 0;
   let lineNo = 1;
+  let rowStartLine = 1;
   let total = 0;
   let truncatedCur = false;
 
@@ -656,10 +683,15 @@ export function parseCsvMatrix(
     truncatedCur = false;
   };
   const pushRow = () => {
-    // Abaikan baris yang seluruhnya kosong (defval semua).
+    // Abaikan baris yang seluruhnya kosong, tetapi catat nomor baris fisik
+    // untuk baris yang masuk matriks (termasuk field multi-baris).
     const isEmpty = row.every((c) => c === defval);
-    if (!isEmpty) matrix.push(row);
+    if (!isEmpty) {
+      matrix.push(row);
+      sourceRows.push(rowStartLine);
+    }
     row = [];
+    rowStartLine = lineNo + 1;
   };
 
   for (let i = 0; i < text.length; i += 1) {
@@ -700,7 +732,13 @@ export function parseCsvMatrix(
           );
           pushCell();
           pushRow();
-          return { matrix, delimiter: delim, warnings, truncatedCells };
+          return {
+            matrix,
+            sourceRows,
+            delimiter: delim,
+            warnings,
+            truncatedCells,
+          };
         }
       }
       continue;
@@ -751,13 +789,18 @@ export function parseCsvMatrix(
       `${truncatedCells} sel melebihi ${maxCell.toLocaleString("id-ID")} karakter dan dipotong. Jika ini terjadi di kolom resi, periksa kutip/delimiter file.`
     );
   }
-  return { matrix, delimiter: delim, warnings, truncatedCells };
+  return { matrix, sourceRows, delimiter: delim, warnings, truncatedCells };
 }
 
 export interface LoadedWorkbook {
   sheetNames: string[];
   /** Matriks per sheet (sesuai urutan workbook). */
   matrices: Map<string, unknown[][]>;
+  /**
+   * Nomor baris fisik/ordinal per indeks matriks, per sheet.
+   * XLSX: nomor baris worksheet; CSV: baris fisik; HTML/XML: ordinal <tr>/<Row>.
+   */
+  sourceRows: Map<string, number[]>;
   /** Worksheet mentah per nama (untuk merges + inspeksi formula). */
   worksheets: Map<string, ExcelJS.Worksheet>;
 }
@@ -813,6 +856,7 @@ export async function loadWorkbookFromBuffer(
       );
     }
     const matrices = new Map<string, unknown[][]>();
+    const sourceRows = new Map<string, number[]>();
     for (const s of parsed.sheets) {
       if (opts.maxRows !== undefined || opts.maxCols !== undefined) {
         validateMatrixLimits(s.matrix, {
@@ -826,9 +870,15 @@ export async function loadWorkbookFromBuffer(
         });
       }
       matrices.set(s.name, s.matrix);
+      sourceRows.set(s.name, s.sourceRows);
     }
     for (const w of parsed.warnings) console.warn(`[html] ${fileName ?? ""}: ${w}`);
-    return { sheetNames: parsed.sheets.map((s) => s.name), matrices, worksheets: new Map() };
+    return {
+      sheetNames: parsed.sheets.map((s) => s.name),
+      matrices,
+      sourceRows,
+      worksheets: new Map(),
+    };
   }
 
   // SpreadsheetML 2003 (.xml): ekstrak worksheet otomatis.
@@ -841,6 +891,7 @@ export async function loadWorkbookFromBuffer(
       );
     }
     const matrices = new Map<string, unknown[][]>();
+    const sourceRows = new Map<string, number[]>();
     for (const s of parsed.sheets) {
       if (opts.maxRows !== undefined || opts.maxCols !== undefined) {
         validateMatrixLimits(s.matrix, {
@@ -854,9 +905,15 @@ export async function loadWorkbookFromBuffer(
         });
       }
       matrices.set(s.name, s.matrix);
+      sourceRows.set(s.name, s.sourceRows);
     }
     for (const w of parsed.warnings) console.warn(`[xml] ${fileName ?? ""}: ${w}`);
-    return { sheetNames: parsed.sheets.map((s) => s.name), matrices, worksheets: new Map() };
+    return {
+      sheetNames: parsed.sheets.map((s) => s.name),
+      matrices,
+      sourceRows,
+      worksheets: new Map(),
+    };
   }
 
   // Teks delimited TAPI ekstensi mengaku Excel -> tolak eksplisit agar
@@ -903,6 +960,7 @@ export async function loadWorkbookFromBuffer(
     return {
       sheetNames: ["Sheet1"],
       matrices: new Map([["Sheet1", matrix]]),
+      sourceRows: new Map([["Sheet1", parsed.sourceRows]]),
       worksheets: new Map(),
     };
   }
@@ -919,12 +977,15 @@ export async function loadWorkbookFromBuffer(
   }
   const sheetNames = wb.worksheets.map((ws) => ws.name);
   const matrices = new Map<string, unknown[][]>();
+  const sourceRows = new Map<string, number[]>();
   const worksheets = new Map<string, ExcelJS.Worksheet>();
   for (const ws of wb.worksheets) {
-    matrices.set(ws.name, worksheetToMatrix(ws, defval));
+    const rows: number[] = [];
+    matrices.set(ws.name, worksheetToMatrix(ws, defval, rows));
+    sourceRows.set(ws.name, rows);
     worksheets.set(ws.name, ws);
   }
-  return { sheetNames, matrices, worksheets };
+  return { sheetNames, matrices, sourceRows, worksheets };
 }
 
 /** Matriks AOA -> objek baris (baris pertama sebagai header). */

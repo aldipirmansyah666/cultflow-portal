@@ -109,11 +109,12 @@ export async function POST(req: Request) {
   try {
     // Sumber kebenaran ganda: legacy fee_loket + Master loket_profiles.
     // PPID dianggap masuk bila ada di SALAH SATU tabel periode tersebut.
+    // Fail-closed: jangan pernah mengubah error DB menjadi "tidak ditemukan".
+    // Jika salah satu sumber gagal, seluruh verifikasi harus gagal (503),
+    // bukan melaporkan PPID valid sebagai missing.
     const [inFee, inProfiles] = await Promise.all([
-      existingPpids("fee_loket", unique, cleanPeriode).catch(() => new Set<string>()),
-      existingPpids("loket_profiles", unique, cleanPeriode).catch(() =>
-        new Set<string>()
-      ),
+      existingPpids("fee_loket", unique, cleanPeriode),
+      existingPpids("loket_profiles", unique, cleanPeriode),
     ]);
     const missing = unique.filter((p) => !inFee.has(p) && !inProfiles.has(p));
     return NextResponse.json({
@@ -125,9 +126,10 @@ export async function POST(req: Request) {
       missing: missing.slice(0, MAX_MISSING_LISTED),
     });
   } catch (e) {
+    console.error("[fee-rekap/verify] gagal query database:", e);
     return NextResponse.json(
-      { error: e instanceof Error ? e.message : "Verifikasi gagal" },
-      { status: 500 }
+      { error: "Gagal memverifikasi ke database. Coba lagi." },
+      { status: 503 }
     );
   }
 }

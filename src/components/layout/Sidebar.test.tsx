@@ -99,10 +99,17 @@ describe("Sidebar", () => {
 });
 
 describe("MobileSidebar", () => {
-  it("me-render menu navigasi", () => {
-    render(<MobileSidebar open={true} onClose={() => {}} />);
+  it("me-render menu navigasi untuk ADMIN", () => {
+    render(<MobileSidebar open={true} onClose={() => {}} role="ADMIN" />);
     expect(
       screen.getByRole("link", { name: /Reconcile Validator/ }),
     ).toHaveAttribute("href", "/reconcile");
+  });
+
+  it("menyembunyikan Reconcile Validator untuk USER", () => {
+    render(<MobileSidebar open={true} onClose={() => {}} role="USER" />);
+    expect(
+      screen.queryByRole("link", { name: /Reconcile Validator/ }),
+    ).not.toBeInTheDocument();
   });
 });

@@ -15,6 +15,8 @@ export interface SessionPayload {
   username: string;
   name: string;
   role: "ADMIN" | "USER";
+  /** Versi sesi user; dicocokkan dengan public.users.token_version. */
+  tokenVersion: number;
 }
 
 /**
@@ -78,6 +80,18 @@ export async function verifySessionToken(
   try {
     const { payload } = await jwtVerify(token, getJwtSecret());
     const session = payload as unknown as SessionPayload;
+    if (typeof session.userId !== "string" || session.userId === "") {
+      return null;
+    }
+    // Token lama (sebelum token_version ada) tidak punya klaim ini dan harus
+    // login ulang. Versi 0/negatif juga tidak sah.
+    if (
+      typeof session.tokenVersion !== "number" ||
+      !Number.isInteger(session.tokenVersion) ||
+      session.tokenVersion < 1
+    ) {
+      return null;
+    }
     return { ...session, role: normalizeSessionRole(session.role) };
   } catch {
     return null;
@@ -117,12 +131,58 @@ export async function getSessionFromRequest(
   return verifySessionToken(token);
 }
 
-/** Baca sesi dari cookie (server component / route handler). */
+interface CurrentUserAuth {
+  tokenVersion: number;
+  role: unknown;
+}
+
+/**
+ * Ambil token_version + role terkini dari DB. Fail-closed: error DB dianggap
+ * sesi tidak valid agar kegagalan database tidak membuka akses.
+ */
+async function getCurrentUserAuth(userId: string): Promise<CurrentUserAuth | null> {
+  try {
+    const { getSupabaseAdmin } = await import("@/lib/supabase/server");
+    const { data, error } = await getSupabaseAdmin()
+      .from("users")
+      .select("token_version,role")
+      .eq("id", userId)
+      .limit(1);
+    if (error) throw error;
+    const row = (data ?? [])[0] as
+      | { token_version?: unknown; role?: unknown }
+      | undefined;
+    if (!row) return null;
+    const tokenVersion = Number(row.token_version);
+    if (!Number.isInteger(tokenVersion) || tokenVersion < 1) return null;
+    return { tokenVersion, role: row.role };
+  } catch (e) {
+    console.error("[auth] gagal memvalidasi token_version ke database:", e);
+    return null;
+  }
+}
+
+/**
+ * Baca sesi dari cookie untuk server component / route handler.
+ *
+ * Berbeda dari getSessionFromRequest() yang hanya memverifikasi signature
+ * (dipakai proxy), fungsi ini juga mencocokkan tokenVersion dan role dengan
+ * database. Karena itu logout / penurunan role langsung berlaku di API dan
+ * semua server guard yang memakai getSession().
+ */
 export async function getSession(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
   if (!token) return null;
-  return verifySessionToken(token);
+  const session = await verifySessionToken(token);
+  if (!session) return null;
+  const current = await getCurrentUserAuth(session.userId);
+  if (!current || current.tokenVersion !== session.tokenVersion) return null;
+  const currentRole = normalizeSessionRole(current.role);
+  // Defense in depth: perubahan role tanpa bump (mis. via SQL manual) tetap
+  // membatalkan token lama; role tidak boleh diambil alih dari klaim lama.
+  if (normalizeSessionRole(session.role) !== currentRole) return null;
+  return { ...session, role: currentRole };
 }
 
 /** Path publik yang lolos proxy auth. */

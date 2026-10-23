@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  getReconcileFileSizeWarning,
   MAX_EXCEL_SIZE_BYTES,
   MAX_FEE_EXCEL_SIZE_BYTES,
+  RECONCILE_SMALL_FILE_WARNING_BYTES,
   validateFileSize,
 } from "./fileValidation";
 
@@ -34,5 +36,34 @@ describe("fileValidation limits", () => {
       )
     ).toContain("Maksimal 15 MB");
     expect(validateFileSize(fakeFile("nol.xlsx", 0))).toContain("kosong");
+  });
+});
+
+describe("peringatan ukuran berkas Reconcile", () => {
+  it("memberi warning di bawah 1.000 KB tanpa memblokir", () => {
+    const file = fakeFile("rekon-kecil.xlsx", 999 * 1024);
+    const warning = getReconcileFileSizeWarning(file);
+
+    expect(RECONCILE_SMALL_FILE_WARNING_BYTES).toBe(1000 * 1024);
+    expect(warning).toContain("kurang dari 1.000 KB");
+    expect(warning).toContain("999 KB");
+    expect(warning).toContain("jumlah resi mungkin belum sesuai");
+    // Helper warning tidak mengembalikan error/penolakan.
+    expect(validateFileSize(file)).toBeNull();
+  });
+
+  it("tidak memberi warning tepat 1.000 KB atau lebih", () => {
+    expect(
+      getReconcileFileSizeWarning(
+        fakeFile("pas.xlsx", RECONCILE_SMALL_FILE_WARNING_BYTES)
+      )
+    ).toBeNull();
+    expect(
+      getReconcileFileSizeWarning(fakeFile("besar.xlsx", 2 * 1024 * 1024))
+    ).toBeNull();
+  });
+
+  it("file kosong tidak menghasilkan warning ganda", () => {
+    expect(getReconcileFileSizeWarning(fakeFile("kosong.xlsx", 0))).toBeNull();
   });
 });

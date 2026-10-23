@@ -136,6 +136,20 @@ describe("extractReconcileInputRows", () => {
     const rows = extractReconcileInputRows(matrix, header!);
     expect(rows.map((r) => r.sourceRow)).toEqual([4, 6]);
   });
+
+  it("[H1] memakai sourceRows fisik dari parser, bukan indeks matriks", () => {
+    const matrix: unknown[][] = [
+      ["LAPORAN RESI"],
+      [""],
+      ["Produk", "Nomor Resi"],
+      ["PKH", "P26001"],
+      [""],
+      ["EC3", "SHPE9"],
+    ];
+    const header = findReconcileHeader(matrix);
+    const rows = extractReconcileInputRows(matrix, header!, [1, 2, 3, 7, 8, 10]);
+    expect(rows.map((r) => r.sourceRow)).toEqual([7, 10]);
+  });
 });
 describe("columnLetter", () => {
   it("A, Z, AA", () => {

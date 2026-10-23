@@ -25,7 +25,12 @@ export const NAV_ITEMS: NavItem[] = [
   { title: "Monitoring Resi", href: "/monitoring-resi", icon: "PackageSearch" },
   { title: "Bagging Generator", href: "/bagging", icon: "Package" },
   { title: "Bailout Generator", href: "/bailout", icon: "PackageOpen" },
-  { title: "Reconcile Validator", href: "/reconcile", icon: "Scale" },
+  {
+    title: "Reconcile Validator",
+    href: "/reconcile",
+    icon: "Scale",
+    roles: ["ADMIN"],
+  },
   { title: "Rekap Fee Loket", href: "/fee-rekap", icon: "Wallet" },
   { title: "WA Logs", href: "/logs", icon: "MessagesSquare" },
   {

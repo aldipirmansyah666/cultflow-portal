@@ -186,7 +186,9 @@ export interface ReconcileInputRow {
  */
 export function extractReconcileInputRows(
   matrix: unknown[][],
-  header: DetectedHeader
+  header: DetectedHeader,
+  /** Nomor baris fisik per indeks matriks (dari LoadedWorkbook.sourceRows). */
+  sourceRows?: number[]
 ): ReconcileInputRow[] {
   const out: ReconcileInputRow[] = [];
   for (let r = header.row + 1; r < matrix.length; r += 1) {
@@ -205,8 +207,13 @@ export function extractReconcileInputRows(
     ) {
       continue;
     }
-    // `r` = indeks matriks 0-based → nomor baris Excel = r + 1.
-    out.push({ produk, nomor_resi, sourceRow: r + 1 });
+    // Utamakan nomor baris fisik dari parser; fallback ke indeks + 1 untuk
+    // pemanggil lama yang hanya punya matriks.
+    out.push({
+      produk,
+      nomor_resi,
+      sourceRow: sourceRows?.[r] ?? r + 1,
+    });
   }
   return out;
 }
@@ -218,7 +225,8 @@ export function extractReconcileInputRows(
  * kunci tersebut dengan alias. Dipakai setelah jalur AOA gagal di semua sheet.
  */
 export function normalizeReconcileRowsFromObjects(
-  rows: Record<string, unknown>[]
+  rows: Record<string, unknown>[],
+  sourceRows?: number[]
 ): ReconcileInputRow[] {
   if (rows.length === 0) return [];
   const keys = Object.keys(rows[0] ?? {});
@@ -235,7 +243,12 @@ export function normalizeReconcileRowsFromObjects(
     const produk = cellText(row[produkKey]);
     const nomor_resi = cellText(row[resiKey]);
     if (produk === "" && nomor_resi === "") return;
-    out.push({ produk, nomor_resi, sourceRow: i + 2 });
+    // `rows[0]` = matriks indeks 1 (header di indeks 0).
+    out.push({
+      produk,
+      nomor_resi,
+      sourceRow: sourceRows?.[i + 1] ?? i + 2,
+    });
   });
   return out;
 }

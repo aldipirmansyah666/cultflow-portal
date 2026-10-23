@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   authenticateUser,
+  bumpUserTokenVersion,
   countUsers,
   createUser,
   deleteUser,
@@ -24,6 +25,7 @@ const ADMIN_ROW: DbUser = {
   password: "$2b$10$abcdefghijklmnopqrstuuTESTHASH",
   role: "ADMIN",
   created_at: "2026-01-01T00:00:00Z",
+  token_version: 1,
 };
 
 /** Fake rantai query minimal (select/eq/limit/order/single/insert/update/delete). */
@@ -66,7 +68,10 @@ function fakeClient(
       eq: () => handler("delete-eq", ""),
     }),
   });
-  return { from: tableFn } as unknown as SupabaseClient;
+  return {
+    from: tableFn,
+    rpc: (fn: string, args: unknown) => handler("rpc", fn, args),
+  } as unknown as SupabaseClient;
 }
 
 describe("normalizeRole / toSafeUser", () => {
@@ -181,6 +186,7 @@ describe("authenticateUser", () => {
     });
     const ok = await authenticateUser(client, "admin", "benar123");
     expect(ok?.user.username).toBe("admin");
+    expect(ok?.tokenVersion).toBe(1);
     expect(ok?.needsRehash).toBe(false);
     expect("password" in (ok?.user ?? {})).toBe(false);
 
@@ -194,6 +200,22 @@ describe("authenticateUser", () => {
     });
     // hash "salt$" invalid -> verify false -> null (tanpa bocor)
     expect(await authenticateUser(legacy, "admin", "x")).toBeNull();
+  });
+
+  it("bumpUserTokenVersion mengembalikan versi baru / melempar saat error", async () => {
+    const ok = fakeClient((op) => {
+      if (op === "rpc") return { data: 2, error: null };
+      throw new Error(`op tak terduga: ${op}`);
+    });
+    expect(await bumpUserTokenVersion(ok, "id-admin")).toBe(2);
+
+    const failing = fakeClient(() => ({
+      data: null,
+      error: { message: "db down" },
+    }));
+    await expect(bumpUserTokenVersion(failing, "id-admin")).rejects.toThrow(
+      "Gagal mencabut sesi"
+    );
   });
 
   it("null untuk user tak ada / password salah", async () => {

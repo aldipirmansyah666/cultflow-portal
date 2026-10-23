@@ -101,6 +101,7 @@ export async function POST(req: Request) {
       username: auth.user.username,
       name: auth.user.name,
       role: normalizeRole(auth.user.role),
+      tokenVersion: auth.tokenVersion,
     });
     await setSessionCookie(token);
 
@@ -113,7 +114,11 @@ export async function POST(req: Request) {
         role: normalizeRole(auth.user.role),
       },
     });
-  } catch {
-    return NextResponse.json({ error: "Terjadi kesalahan server" }, { status: 500 });
+  } catch (e) {
+    console.error("[auth/login] gagal memproses login:", e);
+    return NextResponse.json(
+      { error: "Terjadi kesalahan server" },
+      { status: 500 }
+    );
   }
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -11,7 +11,10 @@ import {
 } from "lucide-react";
 import {
   buildReconcileBreakdown,
+  EC3_PREFIXES,
   paginateReconcileRows,
+  PKH_ACCEPTED_PREFIXES,
+  SHARED_PREFIXES_PKH_PJB_PE,
   validateReconcileRows,
   type ReconcileValidationResult,
 } from "@/core/parsers/reconcileValidator";
@@ -24,9 +27,12 @@ import {
   type ReconcileInputRow,
 } from "@/core/parsers/reconcileHeader";
 import {
+  getReconcileFileSizeWarning,
   MAX_RECONCILE_FILE_SIZE_BYTES,
   validateFileSize,
 } from "@/lib/fileValidation";
+import type { StoredPrefixSuggestion } from "@/core/services/prefixSuggestionService";
+import type { ProductPrefixMap } from "@/core/services/productPrefixService";
 import { cn } from "@/lib/utils";
 
 /**
@@ -36,10 +42,99 @@ import { cn } from "@/lib/utils";
  */
 const RESULT_PAGE_SIZE = 100;
 
+type SaveState = "idle" | "saving" | "saved" | "failed";
+
+function prefixSuggestionKey(
+  productName: string,
+  suggestedPrefix: string
+): string {
+  return `${productName}::${suggestedPrefix}`;
+}
+
+function orderedPrefixEntries(
+  counts: Record<string, number> | undefined,
+  order: readonly string[]
+): [string, number][] {
+  if (!counts) return [];
+  const known = order.filter((prefix) => (counts[prefix] ?? 0) > 0);
+  const dynamic = Object.keys(counts)
+    .filter((prefix) => !order.includes(prefix) && (counts[prefix] ?? 0) > 0)
+    .sort(
+      (a, b) => (counts[b] ?? 0) - (counts[a] ?? 0) || a.localeCompare(b)
+    );
+  return [...known, ...dynamic].map((prefix) => [prefix, counts[prefix] ?? 0]);
+}
+
+function PrefixDetail({
+  counts,
+  order,
+  approvedPrefixes,
+}: {
+  counts: Record<string, number> | undefined;
+  order: readonly string[];
+  approvedPrefixes: readonly string[];
+}) {
+  const entries = orderedPrefixEntries(counts, order);
+  if (entries.length === 0) return null;
+
+  const approved = new Set(
+    approvedPrefixes.map((prefix) => prefix.trim().toUpperCase())
+  );
+  return (
+    <dd className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+      {entries.map(([prefix, count]) => {
+        const isApproved = approved.has(prefix);
+        return (
+          <span
+            key={prefix}
+            title={
+              isApproved
+                ? "Prefix tambahan yang disetujui admin"
+                : "Prefix bawaan validator"
+            }
+            className={cn(
+              "inline-flex items-center gap-1 rounded px-1.5 py-0.5 ring-1",
+              isApproved
+                ? "bg-emerald-50 text-emerald-700 ring-emerald-200"
+                : "bg-slate-50 text-slate-500 ring-slate-200"
+            )}
+          >
+            <span className="font-semibold">{prefix}</span>
+            <span className="text-slate-400">:</span>
+            <span>{count}</span>
+            {isApproved && (
+              <span className="rounded bg-emerald-600 px-1 py-px text-[9px] font-bold tracking-wide text-white uppercase">
+                disetujui
+              </span>
+            )}
+          </span>
+        );
+      })}
+    </dd>
+  );
+}
+
+/** SHA-256 hex dari isi berkas (Web Crypto; butuh HTTPS atau localhost). */
+async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    throw new Error(
+      "Browser tidak menyediakan SHA-256. Audit memerlukan HTTPS atau localhost."
+    );
+  }
+  const digest = await subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), (b) =>
+    b.toString(16).padStart(2, "0")
+  ).join("");
+}
+
 export default function ReconcilePage() {
   const [fileName, setFileName] = useState<string>("");
   const [result, setResult] = useState<ReconcileValidationResult | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [fileSizeWarning, setFileSizeWarning] = useState<string>("");
+  const [prefixSyncError, setPrefixSyncError] = useState<string>("");
+  const [extraPrefixes, setExtraPrefixes] = useState<ProductPrefixMap>({});
   const [parsing, setParsing] = useState(false);
   const [invalidOnly, setInvalidOnly] = useState(false);
   /**
@@ -52,6 +147,17 @@ export default function ReconcilePage() {
   const [page, setPage] = useState(1);
   // Filter produk (opsional) untuk mempersempit tabel.
   const [produkFilter, setProdukFilter] = useState<string>("ALL");
+  const [auditState, setAuditState] = useState<SaveState>("idle");
+  const [auditError, setAuditError] = useState<string>("");
+  const [suggestionState, setSuggestionState] = useState<SaveState>("idle");
+  const [suggestionError, setSuggestionError] = useState<string>("");
+  const [storedSuggestions, setStoredSuggestions] = useState<
+    Record<string, StoredPrefixSuggestion>
+  >({});
+  const [decisionState, setDecisionState] = useState<
+    Record<string, SaveState>
+  >({});
+  const [decisionError, setDecisionError] = useState<string>("");
 
   /**
    * Baris hasil validasi yang cocok filter (status + produk).
@@ -97,8 +203,13 @@ export default function ReconcilePage() {
   }, [result]);
 
   const breakdown = useMemo(
-    () => (result ? buildReconcileBreakdown(result.rows) : null),
-    [result]
+    () =>
+      result
+        ? buildReconcileBreakdown(result.rows, {
+            extraProductPrefixes: extraPrefixes,
+          })
+        : null,
+    [result, extraPrefixes]
   );
 
   /** Nomor halaman yang ditampilkan (jendela 5 tombol di tengah). */
@@ -112,10 +223,56 @@ export default function ReconcilePage() {
     );
   }
 
+  async function loadActivePrefixes(): Promise<ProductPrefixMap> {
+    try {
+      const res = await fetch("/api/reconcile/prefixes", {
+        cache: "no-store",
+      });
+      const body = (await res.json().catch(() => null)) as {
+        error?: unknown;
+        prefixes?: ProductPrefixMap;
+      } | null;
+      if (!res.ok) {
+        throw new Error(
+          typeof body?.error === "string"
+            ? body.error
+            : `Gagal memuat prefix aktif (HTTP ${res.status}).`
+        );
+      }
+      if (
+        !body?.prefixes ||
+        typeof body.prefixes !== "object" ||
+        Array.isArray(body.prefixes)
+      ) {
+        throw new Error("Respons prefix aktif tidak valid.");
+      }
+      const prefixes = body.prefixes;
+      setExtraPrefixes(prefixes);
+      setPrefixSyncError("");
+      return prefixes;
+    } catch (e) {
+      setPrefixSyncError(
+        e instanceof Error
+          ? e.message
+          : "Gagal memuat prefix aktif; validasi memakai cache."
+      );
+      return extraPrefixes;
+    }
+  }
+
   async function handleFile(file: File) {
     setParsing(true);
     setParseError(null);
+    setFileSizeWarning("");
+    setPrefixSyncError("");
     setResult(null);
+    setAuditState("idle");
+    setAuditError("");
+    setSuggestionState("idle");
+    setSuggestionError("");
+    setStoredSuggestions({});
+    setDecisionState({});
+    setDecisionError("");
     // Paginasi & filter direset bersama berkas baru.
     setPage(1);
     setProdukFilter("ALL");
@@ -128,6 +285,12 @@ export default function ReconcilePage() {
         setParseError(sizeErr);
         return;
       }
+      // Peringatan dini non-blocking: file < 1.000 KB sering berarti ekspor
+      // belum lengkap. Validasi tetap dilanjutkan bila admin yakin.
+      setFileSizeWarning(getReconcileFileSizeWarning(file) ?? "");
+      // Ambil prefix approved paralel dengan pembacaan workbook; validator
+      // baru memakainya setelah baris selesai diekstrak.
+      const approvedPrefixesPromise = loadActivePrefixes();
       // exceljs dimuat on-demand agar tidak membebani initial load.
       const {
         loadWorkbookFromBuffer,
@@ -165,7 +328,11 @@ export default function ReconcilePage() {
         }
         const h = findReconcileHeader(m);
         if (!h) continue;
-        const rows = extractReconcileInputRows(m, h);
+        const rows = extractReconcileInputRows(
+          m,
+          h,
+          workbook.sourceRows.get(name)
+        );
         if (rows.length > inputRows.length) {
           sheetName = name;
           header = h;
@@ -179,7 +346,8 @@ export default function ReconcilePage() {
           const m = workbook.matrices.get(name) ?? [];
           if (m.length < 2) continue;
           const rows = normalizeReconcileRowsFromObjects(
-            matrixToObjects<Record<string, unknown>>(m)
+            matrixToObjects<Record<string, unknown>>(m),
+            workbook.sourceRows.get(name)
           );
           if (rows.length > inputRows.length) {
             sheetName = name;
@@ -206,7 +374,13 @@ export default function ReconcilePage() {
       );
       // Kolom resi untuk alamat sel (mis. "D412") di laporan.
       setResiCol(header ? header.resiCol : -1);
-      setResult(validateReconcileRows(inputRows));
+      const approvedPrefixes = await approvedPrefixesPromise;
+      const validated = validateReconcileRows(inputRows, {
+        extraProductPrefixes: approvedPrefixes,
+      });
+      setResult(validated);
+      void saveAudit(file, buffer, validated.summary);
+      void savePrefixSuggestions(validated.prefixSuggestions);
     } catch (err) {
       setParseError(
         err instanceof Error ? err.message : "Gagal membaca berkas."
@@ -216,10 +390,170 @@ export default function ReconcilePage() {
     }
   }
 
+  async function saveAudit(
+    file: File,
+    buffer: ArrayBuffer,
+    summary: { total: number; valid: number; invalid: number }
+  ) {
+    setAuditState("saving");
+    setAuditError("");
+    try {
+      const fileSha256 = await sha256Hex(buffer);
+      const res = await fetch("/api/reconcile/runs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: file.name,
+          fileSha256,
+          totalRows: summary.total,
+          validRows: summary.valid,
+          invalidRows: summary.invalid,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as {
+          error?: unknown;
+        } | null;
+        throw new Error(
+          typeof body?.error === "string"
+            ? body.error
+            : `Server menolak audit (HTTP ${res.status}).`
+        );
+      }
+      setAuditState("saved");
+    } catch (e) {
+      setAuditState("failed");
+      setAuditError(
+        e instanceof Error ? e.message : "Gagal menyimpan audit Reconcile."
+      );
+    }
+  }
+
+  async function savePrefixSuggestions(
+    suggestions: ReconcileValidationResult["prefixSuggestions"]
+  ) {
+    setStoredSuggestions({});
+    setDecisionState({});
+    setDecisionError("");
+    if (suggestions.length === 0) {
+      setSuggestionState("idle");
+      setSuggestionError("");
+      return;
+    }
+
+    setSuggestionState("saving");
+    setSuggestionError("");
+    try {
+      const res = await fetch("/api/reconcile/prefix-suggestions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ suggestions }),
+      });
+      const body = (await res.json().catch(() => null)) as {
+        error?: unknown;
+        suggestions?: StoredPrefixSuggestion[];
+      } | null;
+      if (!res.ok) {
+        throw new Error(
+          typeof body?.error === "string"
+            ? body.error
+            : `Server menolak usulan prefix (HTTP ${res.status}).`
+        );
+      }
+
+      const stored: Record<string, StoredPrefixSuggestion> = {};
+      const items = Array.isArray(body?.suggestions)
+        ? body.suggestions
+        : [];
+      for (const item of items) {
+        stored[prefixSuggestionKey(item.productName, item.suggestedPrefix)] =
+          item;
+      }
+      setStoredSuggestions(stored);
+      setSuggestionState("saved");
+    } catch (e) {
+      setSuggestionState("failed");
+      setSuggestionError(
+        e instanceof Error ? e.message : "Gagal menyimpan usulan prefix."
+      );
+    }
+  }
+
+  async function decideSuggestion(
+    suggestion: ReconcileValidationResult["prefixSuggestions"][number],
+    status: "approved" | "rejected"
+  ) {
+    const key = prefixSuggestionKey(
+      suggestion.productName,
+      suggestion.suggestedPrefix
+    );
+    if (decisionState[key] === "saving") return;
+
+    setDecisionState((prev) => ({ ...prev, [key]: "saving" }));
+    setDecisionError("");
+    try {
+      const res = await fetch("/api/reconcile/prefix-suggestions", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: suggestion.productName,
+          suggestedPrefix: suggestion.suggestedPrefix,
+          status,
+        }),
+      });
+      const body = (await res.json().catch(() => null)) as {
+        error?: unknown;
+        suggestion?: StoredPrefixSuggestion;
+      } | null;
+      if (!res.ok) {
+        throw new Error(
+          typeof body?.error === "string"
+            ? body.error
+            : `Server menolak keputusan (HTTP ${res.status}).`
+        );
+      }
+      const updated = body?.suggestion;
+      if (!updated) {
+        throw new Error("Respons keputusan usulan tidak valid.");
+      }
+      setStoredSuggestions((prev) => ({ ...prev, [key]: updated }));
+      setExtraPrefixes((prev) => {
+        const productName = updated.productName.trim().toUpperCase();
+        const prefix = updated.suggestedPrefix.trim().toUpperCase();
+        const current = prev[productName] ?? [];
+        if (updated.status === "approved") {
+          if (current.includes(prefix)) return prev;
+          return { ...prev, [productName]: [...current, prefix] };
+        }
+        if (!current.includes(prefix)) return prev;
+        const next = current.filter((item) => item !== prefix);
+        const copy = { ...prev };
+        if (next.length === 0) delete copy[productName];
+        else copy[productName] = next;
+        return copy;
+      });
+      setDecisionState((prev) => ({ ...prev, [key]: "saved" }));
+    } catch (e) {
+      setDecisionState((prev) => ({ ...prev, [key]: "failed" }));
+      setDecisionError(
+        e instanceof Error ? e.message : "Gagal memperbarui usulan prefix."
+      );
+    }
+  }
+
   function reset() {
     setFileName("");
     setResult(null);
     setParseError(null);
+    setFileSizeWarning("");
+    setPrefixSyncError("");
+    setAuditState("idle");
+    setAuditError("");
+    setSuggestionState("idle");
+    setSuggestionError("");
+    setStoredSuggestions({});
+    setDecisionState({});
+    setDecisionError("");
     setInvalidOnly(false);
     setResiCol(-1);
     setPage(1);
@@ -286,6 +620,29 @@ export default function ReconcilePage() {
             </p>
           )}
         </div>
+        {fileSizeWarning && (
+          <div
+            role="status"
+            className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+          >
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span className="break-words whitespace-pre-wrap">
+              {fileSizeWarning} Validasi tetap dapat dilanjutkan.
+            </span>
+          </div>
+        )}
+        {prefixSyncError && (
+          <div
+            role="alert"
+            className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800"
+          >
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span className="break-words whitespace-pre-wrap">
+              {prefixSyncError} Prefix yang disetujui tetap dicoba dari cache;
+              unggah ulang setelah koneksi pulih.
+            </span>
+          </div>
+        )}
         {parseError && (
           <div role="alert" className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3">
             <p className="flex items-start gap-2 text-sm text-red-700">
@@ -294,10 +651,35 @@ export default function ReconcilePage() {
             </p>
             <p className="mt-2 pl-6 text-xs text-red-600">
               Tips: buka file di Excel → periksa sel yang dilaporkan → hapus
-              tanda kutip (") liar / teks tempelan panjang → simpan ulang
+              tanda kutip (&quot;) liar / teks tempelan panjang → simpan ulang
               sebagai .xlsx lalu unggah kembali. Jika file berekstensi .csv,
               buka dengan Notepad dan pastikan delimiter konsisten (; atau ,).
             </p>
+          </div>
+        )}
+        {result && auditState !== "idle" && (
+          <div
+            role={auditState === "failed" ? "alert" : "status"}
+            className={cn(
+              "mt-3 flex items-start gap-2 rounded-lg border p-3 text-sm",
+              auditState === "failed"
+                ? "border-amber-200 bg-amber-50 text-amber-800"
+                : "border-emerald-200 bg-emerald-50 text-emerald-700"
+            )}
+          >
+            {auditState === "saved" ? (
+              <CheckCircle2 className="mt-0.5 size-4 shrink-0" aria-hidden />
+            ) : auditState === "failed" ? (
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            ) : (
+              <Scale className="mt-0.5 size-4 shrink-0 animate-pulse" aria-hidden />
+            )}
+            <span className="break-words">
+              {auditState === "saving" && "Menyimpan audit validasi…"}
+              {auditState === "saved" && "Audit validasi tersimpan."}
+              {auditState === "failed" &&
+                `Validasi selesai, tetapi audit gagal disimpan: ${auditError}`}
+            </span>
           </div>
         )}
       </section>
@@ -328,49 +710,65 @@ export default function ReconcilePage() {
                       {breakdown.pkhValid} resi
                     </dd>
                   </div>
-                  <dd className="font-mono text-[11px] text-slate-500">
-                    P26: {breakdown.pkhValidByPrefix.P26} • TTSPOS:{" "}
-                    {breakdown.pkhValidByPrefix.TTSPOS} • 26MNG:{" "}
-                    {breakdown.pkhValidByPrefix["26MNG"]} • 26Lainnya:{" "}
-                    {breakdown.pkhValidByPrefix["26KOM"] +
-                      breakdown.pkhValidByPrefix["26EVP"] +
-                      breakdown.pkhValidByPrefix["26ASD"] +
-                      breakdown.pkhValidByPrefix["26"]}
-                  </dd>
+                  <PrefixDetail
+                    counts={breakdown.validByPrefix.PKH}
+                    order={PKH_ACCEPTED_PREFIXES}
+                    approvedPrefixes={extraPrefixes.PKH ?? []}
+                  />
                   <div className="flex items-baseline justify-between gap-2">
                     <dt className="font-semibold text-slate-600">EC3 Valid</dt>
                     <dd className="font-extrabold text-emerald-700">
                       {breakdown.ec3Valid} resi
                     </dd>
                   </div>
-                  <dd className="font-mono text-[11px] text-slate-500">
-                    SHPE: {breakdown.ec3ValidByPrefix.SHPE} • P26:{" "}
-                    {breakdown.ec3ValidByPrefix.P26}
-                  </dd>
+                  <PrefixDetail
+                    counts={breakdown.validByPrefix.EC3}
+                    order={EC3_PREFIXES}
+                    approvedPrefixes={extraPrefixes.EC3 ?? []}
+                  />
                   <div className="flex items-baseline justify-between gap-2">
                     <dt className="font-semibold text-slate-600">PE Valid</dt>
                     <dd className="font-extrabold text-emerald-700">
                       {breakdown.peValid} resi
                     </dd>
                   </div>
+                  <PrefixDetail
+                    counts={breakdown.validByPrefix.PE}
+                    order={SHARED_PREFIXES_PKH_PJB_PE}
+                    approvedPrefixes={extraPrefixes.PE ?? []}
+                  />
                   <div className="flex items-baseline justify-between gap-2">
                     <dt className="font-semibold text-slate-600">PJB Valid</dt>
                     <dd className="font-extrabold text-emerald-700">
                       {breakdown.pjbValid} resi
                     </dd>
                   </div>
+                  <PrefixDetail
+                    counts={breakdown.validByPrefix.PJB}
+                    order={SHARED_PREFIXES_PKH_PJB_PE}
+                    approvedPrefixes={extraPrefixes.PJB ?? []}
+                  />
                   {Object.entries(breakdown.byProduct)
                     .filter(
                       ([p, s]) =>
                         !["PKH", "EC3", "PE", "PJB"].includes(p) && s.valid > 0
                     )
                     .map(([p, s]) => (
-                      <div key={p} className="flex items-baseline justify-between gap-2">
-                        <dt className="font-semibold text-slate-600">{p} Valid</dt>
-                        <dd className="font-extrabold text-emerald-700">
-                          {s.valid} resi
-                        </dd>
-                      </div>
+                      <Fragment key={p}>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <dt className="font-semibold text-slate-600">
+                            {p} Valid
+                          </dt>
+                          <dd className="font-extrabold text-emerald-700">
+                            {s.valid} resi
+                          </dd>
+                        </div>
+                        <PrefixDetail
+                          counts={breakdown.validByPrefix[p]}
+                          order={[]}
+                          approvedPrefixes={extraPrefixes[p] ?? []}
+                        />
+                      </Fragment>
                     ))}
                 </dl>
               )}
@@ -458,6 +856,133 @@ export default function ReconcilePage() {
                   </li>
                 ))}
               </ul>
+            </section>
+          )}
+
+          {result.prefixSuggestions.length > 0 && (
+            <section className="rounded-xl border border-sky-200 bg-sky-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="flex items-center gap-2 text-sm font-bold text-sky-900">
+                  <AlertTriangle className="size-4" aria-hidden />
+                  Usulan Prefix Baru ({result.prefixSuggestions.length})
+                </p>
+                {suggestionState === "saving" && (
+                  <span className="text-xs font-semibold text-sky-700">
+                    Menyimpan usulan…
+                  </span>
+                )}
+                {suggestionState === "saved" && (
+                  <span className="text-xs font-semibold text-emerald-700">
+                    Usulan tersimpan
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-sky-800">
+                Resi yang tidak cocok dikelompokkan berdasarkan 3 karakter
+                pertama. Usulan disimpan otomatis untuk ditinjau admin, tanpa
+                mengubah hasil validasi. Setelah disetujui, prefix langsung
+                dipakai pada unggahan berikutnya.
+              </p>
+              <ul className="mt-3 divide-y divide-sky-200/70 rounded-lg bg-white/60 px-3">
+                {result.prefixSuggestions.slice(0, 20).map((suggestion) => {
+                  const key = prefixSuggestionKey(
+                    suggestion.productName,
+                    suggestion.suggestedPrefix
+                  );
+                  const stored = storedSuggestions[key];
+                  const status = stored?.status;
+                  const deciding = decisionState[key] === "saving";
+
+                  return (
+                    <li
+                      key={key}
+                      className="flex flex-wrap items-center gap-x-3 gap-y-2 py-2 text-xs"
+                    >
+                      <span className="font-semibold text-slate-800">
+                        {suggestion.productName}
+                      </span>
+                      <code className="rounded bg-sky-100 px-1.5 py-0.5 font-mono font-bold text-sky-900 ring-1 ring-sky-200">
+                        {suggestion.suggestedPrefix}
+                      </code>
+                      <span className="font-semibold text-sky-800">
+                        {suggestion.occurrenceCount} di file ini
+                      </span>
+                      {stored &&
+                        stored.occurrenceCount >
+                          suggestion.occurrenceCount && (
+                          <span className="text-slate-500">
+                            total {stored.occurrenceCount}
+                          </span>
+                        )}
+                      <span className="min-w-0 break-all font-mono text-[11px] text-slate-500">
+                        contoh: {stored?.sampleResi ?? suggestion.sampleResi}
+                      </span>
+                      <div className="ml-auto flex items-center gap-1.5">
+                        {deciding && (
+                          <span className="text-[11px] font-semibold text-sky-700">
+                            Menyimpan…
+                          </span>
+                        )}
+                        {status === "approved" && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 font-semibold text-emerald-700">
+                            <CheckCircle2 className="size-3" aria-hidden />
+                            Disetujui
+                          </span>
+                        )}
+                        {status === "rejected" && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-slate-200 px-2 py-0.5 font-semibold text-slate-600">
+                            <XCircle className="size-3" aria-hidden />
+                            Diabaikan
+                          </span>
+                        )}
+                        {status === "pending" && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={deciding}
+                              onClick={() =>
+                                void decideSuggestion(suggestion, "approved")
+                              }
+                              className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-50"
+                            >
+                              <CheckCircle2 className="size-3" aria-hidden />
+                              Setujui
+                            </button>
+                            <button
+                              type="button"
+                              disabled={deciding}
+                              onClick={() =>
+                                void decideSuggestion(suggestion, "rejected")
+                              }
+                              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-wait disabled:opacity-50"
+                            >
+                              <XCircle className="size-3" aria-hidden />
+                              Abaikan
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              {result.prefixSuggestions.length > 20 && (
+                <p className="mt-2 text-xs text-sky-700">
+                  Menampilkan 20 usulan teratas dari{" "}
+                  {result.prefixSuggestions.length}.
+                </p>
+              )}
+              {suggestionState === "failed" && (
+                <p role="alert" className="mt-2 text-xs text-amber-800">
+                  Validasi tetap selesai, tetapi usulan gagal disimpan:{" "}
+                  {suggestionError}
+                </p>
+              )}
+              {decisionError && (
+                <p role="alert" className="mt-2 text-xs text-amber-800">
+                  Keputusan gagal disimpan: {decisionError}
+                </p>
+              )}
             </section>
           )}
 
