@@ -27,6 +27,12 @@ describe("NAV_ITEMS", () => {
       NAV_ITEMS.find((i) => i.href === "/user-management")?.roles,
     ).toEqual(["ADMIN"]);
   });
+
+  it("membuka Reconcile Validator untuk ADMIN dan USER", () => {
+    expect(
+      NAV_ITEMS.find((i) => i.href === "/reconcile")?.roles,
+    ).toEqual(["ADMIN", "USER"]);
+  });
 });
 
 describe("filterNavByRole", () => {

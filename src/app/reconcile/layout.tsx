@@ -1,12 +1,13 @@
 import type { ReactNode } from "react";
-import { notFound, redirect } from "next/navigation";
-import { getSession, isAdminSession } from "@/lib/session";
+import { redirect } from "next/navigation";
+import { getSession } from "@/lib/session";
 
 /**
  * Guard server-side untuk seluruh route /reconcile.
  *
- * Proxy hanya melakukan pengecekan optimistis dari JWT; layout ini adalah
- * otorisasi sebenarnya (getSession juga memvalidasi token_version ke DB).
+ * Semua role yang login boleh masuk. Proxy hanya melakukan pengecekan
+ * optimistis dari JWT; layout ini adalah otorisasi sebenarnya (getSession
+ * juga memvalidasi token_version ke DB).
  */
 export default async function ReconcileLayout({
   children,
@@ -15,6 +16,5 @@ export default async function ReconcileLayout({
 }) {
   const session = await getSession();
   if (!session) redirect("/login");
-  if (!isAdminSession(session)) notFound();
   return children;
 }

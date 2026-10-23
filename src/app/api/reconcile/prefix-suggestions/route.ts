@@ -1,9 +1,9 @@
 /**
- * /api/reconcile/prefix-suggestions — simpan & tinjau usulan prefix (ADMIN).
+ * /api/reconcile/prefix-suggestions — simpan & tinjau usulan prefix.
  *
- * POST  : upsert kelompok prefix dari satu hasil validasi.
+ * POST  : upsert kelompok prefix dari satu hasil validasi (semua role login).
  * PATCH : setujui/abaikan satu usulan berdasarkan produk + prefix, lalu
- *         sinkronkan prefix aktif ke tabel master dalam RPC atomik.
+ *         sinkronkan prefix aktif ke tabel master dalam RPC atomik (ADMIN).
  */
 import { NextResponse, type NextRequest } from "next/server";
 import { getSession, isAdminSession } from "@/lib/session";
@@ -66,6 +66,14 @@ async function readJsonBody(
   }
 }
 
+async function requireSession() {
+  const session = await getSession();
+  if (!session) {
+    return NextResponse.json({ error: "Belum login" }, { status: 401 });
+  }
+  return null;
+}
+
 async function requireAdmin() {
   const session = await getSession();
   if (!session) {
@@ -78,7 +86,7 @@ async function requireAdmin() {
 }
 
 export async function POST(req: NextRequest) {
-  const unauthorized = await requireAdmin();
+  const unauthorized = await requireSession();
   if (unauthorized) return unauthorized;
 
   const parsed = await readJsonBody(req, MAX_BODY_BYTES);

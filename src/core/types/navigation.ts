@@ -29,7 +29,7 @@ export const NAV_ITEMS: NavItem[] = [
     title: "Reconcile Validator",
     href: "/reconcile",
     icon: "Scale",
-    roles: ["ADMIN"],
+    roles: ["ADMIN", "USER"],
   },
   { title: "Rekap Fee Loket", href: "/fee-rekap", icon: "Wallet" },
   { title: "WA Logs", href: "/logs", icon: "MessagesSquare" },

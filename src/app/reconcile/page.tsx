@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -158,6 +158,33 @@ export default function ReconcilePage() {
     Record<string, SaveState>
   >({});
   const [decisionError, setDecisionError] = useState<string>("");
+  // Role sesi dimuat dari server; tombol approval hanya untuk ADMIN.
+  // Null selama memuat / bila gagal — tombol tetap tersembunyi (fail-closed).
+  const [role, setRole] = useState<"ADMIN" | "USER" | null>(null);
+  const isAdmin = role === "ADMIN";
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/auth/me", { cache: "no-store" });
+        if (!res.ok) return;
+        const body = (await res.json()) as { user?: { role?: unknown } };
+        if (cancelled) return;
+        const nextRole =
+          typeof body.user?.role === "string" &&
+          body.user.role.trim().toUpperCase() === "ADMIN"
+            ? "ADMIN"
+            : "USER";
+        setRole(nextRole);
+      } catch {
+        // Biarkan null: tombol approval tetap tersembunyi.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /**
    * Baris hasil validasi yang cocok filter (status + produk).
@@ -483,6 +510,12 @@ export default function ReconcilePage() {
     suggestion: ReconcileValidationResult["prefixSuggestions"][number],
     status: "approved" | "rejected"
   ) {
+    if (!isAdmin) {
+      setDecisionError(
+        "Hanya admin yang dapat menyetujui atau mengabaikan usulan prefix."
+      );
+      return;
+    }
     const key = prefixSuggestionKey(
       suggestion.productName,
       suggestion.suggestedPrefix
@@ -935,7 +968,12 @@ export default function ReconcilePage() {
                             Diabaikan
                           </span>
                         )}
-                        {status === "pending" && (
+                        {status === "pending" && !isAdmin && role === "USER" && (
+                          <span className="text-[11px] font-semibold text-slate-500">
+                            Menunggu tinjauan admin
+                          </span>
+                        )}
+                        {status === "pending" && isAdmin && (
                           <>
                             <button
                               type="button"

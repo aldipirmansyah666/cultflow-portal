@@ -1,6 +1,6 @@
-/** GET /api/reconcile/prefixes — prefix tambahan aktif untuk validator (ADMIN). */
+/** GET /api/reconcile/prefixes — prefix tambahan aktif untuk validator (semua role login). */
 import { NextResponse } from "next/server";
-import { getSession, isAdminSession } from "@/lib/session";
+import { getSession } from "@/lib/session";
 import { getSupabaseAdmin } from "@/lib/supabase/server";
 import { listActiveProductPrefixes } from "@/core/services/productPrefixService";
 
@@ -8,9 +8,6 @@ export async function GET() {
   const session = await getSession();
   if (!session) {
     return NextResponse.json({ error: "Belum login" }, { status: 401 });
-  }
-  if (!isAdminSession(session)) {
-    return NextResponse.json({ error: "Akses ditolak" }, { status: 403 });
   }
 
   try {

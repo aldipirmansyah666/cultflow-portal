@@ -106,8 +106,15 @@ describe("MobileSidebar", () => {
     ).toHaveAttribute("href", "/reconcile");
   });
 
-  it("menyembunyikan Reconcile Validator untuk USER", () => {
+  it("menampilkan Reconcile Validator untuk USER", () => {
     render(<MobileSidebar open={true} onClose={() => {}} role="USER" />);
+    expect(
+      screen.getByRole("link", { name: /Reconcile Validator/ }),
+    ).toHaveAttribute("href", "/reconcile");
+  });
+
+  it("menyembunyikan Reconcile Validator saat role belum diketahui", () => {
+    render(<MobileSidebar open={true} onClose={() => {}} />);
     expect(
       screen.queryByRole("link", { name: /Reconcile Validator/ }),
     ).not.toBeInTheDocument();
